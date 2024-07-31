@@ -1,2 +1,10 @@
 .env
 test.pdf
+invoice.py
+app.log
+/output
+
+/_pycache_
+extracted_data.csv
+Formatted_Invoices.docx
+
