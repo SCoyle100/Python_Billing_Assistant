@@ -1,5 +1,5 @@
 import sys
-from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QPushButton, QMessageBox, QLabel
+from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QPushButton, QMessageBox, QLabel, QSpacerItem, QSizePolicy
 from PyQt5.QtGui import QFont
 from PyQt5.QtCore import Qt, pyqtSlot, pyqtSignal
 import subprocess
@@ -36,6 +36,7 @@ class BillingAutomationGUI(QWidget):
         self.label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.label)
 
+        # First set of buttons
         self.start_button = QPushButton('Convert PDF to Word')
         self.start_button.setFont(QFont('Arial', 14))
         self.start_button.setStyleSheet("background-color: #4caf50; color: #ffffff;")
@@ -48,7 +49,21 @@ class BillingAutomationGUI(QWidget):
         self.process_button.clicked.connect(self.process_document)
         layout.addWidget(self.process_button)
 
+        # Add spacer between the two sets of buttons
+        layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
 
+        # Second set of buttons
+        self.select_word_button = QPushButton('Select Word Document for Invoice Creation')
+        self.select_word_button.setFont(QFont('Arial', 14))
+        self.select_word_button.setStyleSheet("background-color: #2196f3; color: #ffffff;")
+        self.select_word_button.clicked.connect(self.select_word_document)
+        layout.addWidget(self.select_word_button)
+
+        self.select_excel_button = QPushButton('Select Excel for Internal Invoice Creation')
+        self.select_excel_button.setFont(QFont('Arial', 14))
+        self.select_excel_button.setStyleSheet("background-color: #2196f3; color: #ffffff;")
+        self.select_excel_button.clicked.connect(self.select_excel_document)
+        layout.addWidget(self.select_excel_button)
 
         self.setLayout(layout)
 
@@ -85,6 +100,29 @@ class BillingAutomationGUI(QWidget):
                 self.showMessageSignal.emit('Exception', str(e), BillingAutomationGUI.ICON_CRITICAL)
 
         threading.Thread(target=run_process_document).start()
+
+    def select_word_document(self):
+            # Add functionality to handle Word document selection
+            def run_select_word():
+                try:
+                    logging.debug("Selecting Word document instead of starting with a PDF")
+                    result = subprocess.run([sys.executable, "select_word.py"], capture_output=True, text=True)
+                    logging.debug(f"stdout: {result.stdout}")
+                    logging.debug(f"stderr: {result.stderr}")
+                    if result.returncode == 0:
+                        self.showMessageSignal.emit('Info', result.stdout, BillingAutomationGUI.ICON_INFORMATION)
+                    else:
+                        self.showMessageSignal.emit('Error', result.stderr, BillingAutomationGUI.ICON_CRITICAL)
+                except Exception as e:
+                    logging.error(f"Exception occurred: {str(e)}")
+                    self.showMessageSignal.emit('Exception', str(e), BillingAutomationGUI.ICON_CRITICAL)
+
+            threading.Thread(target=run_select_word).start()
+
+
+    def select_excel_document(self):
+        # Add functionality to handle Excel document selection
+        pass
 
     @pyqtSlot(str, str, int)
     def show_message(self, title, message, icon):
