@@ -2,6 +2,8 @@ import sys
 from PyQt5.QtWidgets import QApplication, QMessageBox
 import pandas as pd
 import docx
+from docx.shared import Pt
+from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
 from openai import OpenAI
 import os
 from dotenv import load_dotenv
@@ -11,27 +13,21 @@ from pdf_to_docx import PDFConverter
 import logging
 import win32com.client as win32
 
-
-
 logging.basicConfig(level=logging.DEBUG)
 
 # Function to get the path of the docx file
 def get_docx_path(pdf_filename):
-    # Assume the script directory and output directory structure is consistent
     script_dir = os.path.dirname(os.path.abspath(__file__))
     output_dir = os.path.join(script_dir, "output")
 
-    # Ensure the output directory exists
     if not os.path.exists(output_dir):
         logging.error(f"Output directory does not exist: {output_dir}")
         return None
 
-    # Construct the .docx file path based on the input PDF file name
     base_name = os.path.basename(pdf_filename)
     file_name, _ = os.path.splitext(base_name)
     docx_path = os.path.join(output_dir, f"{file_name}.docx")
 
-    # Check if the file exists
     if not os.path.exists(docx_path):
         logging.error(f"DOCX file does not exist: {docx_path}")
         return None
@@ -39,7 +35,6 @@ def get_docx_path(pdf_filename):
     logging.debug(f"Retrieved docx path: {docx_path}")
     return docx_path
 
-# Function to read input_path from file
 def read_input_path():
     try:
         with open("input_path.txt", "r") as f:
@@ -55,18 +50,10 @@ if not input_path:
     sys.exit(1)
 
 docx_path = get_docx_path(input_path)
-
-
 converter = PDFConverter()
-
-
 client = OpenAI()
-
 load_dotenv()
-
-
 app = QApplication(sys.argv)
-
 
 converter.doc = win32.Dispatch("Word.Application").ActiveDocument
 if converter.doc is None:
@@ -74,7 +61,6 @@ if converter.doc is None:
     sys.exit(1)
 
 converter.save_changes()
-
 converter.save_changes()
 
 pdf_path = converter.create_pdf_from_docx(docx_path)
@@ -83,22 +69,6 @@ if pdf_path:
     QMessageBox.information(None, 'Success', f'PDF created: {pdf_path}')
 else:
     QMessageBox.warning(None, 'Error', 'Failed to create PDF from DOCX.')
-
-'''
-def select_file(file_type="Word Document", file_filter="Word files (*.docx);;All files (*.*)"):
-    app = QApplication(sys.argv)
-    options = QFileDialog.Options()
-    file_path, _ = QFileDialog.getOpenFileName(
-        None,
-        f"Select a {file_type}",
-        "",
-        file_filter,
-        options=options
-    )
-    return file_path
-'''
-
-
 
 def read_word_file(docx_path):
     doc = docx.Document(docx_path)
@@ -123,14 +93,13 @@ def get_gpt_response(user_input):
 
 def extract_data_with_openai(table_data):
     prompt = (
-        "Extract the description and amounts table, which is city names and prices, from the following text and return them as a Python list of tuples:\n"
+        "Extract the description and amounts columsn from the table, which is typically city names and prices, from the following text and return them as a Python list of tuples. If there is only 1 amount in the column, that means there is only 1 row.  If a description has multiple cities in it, but only 1 amount, then that description just happens to be a list of cities:\n"
         f"{table_data}\n"
         "Return only the list of tuples."
     )
     
     response = get_gpt_response(prompt)
     
-    # Clean up the response to ensure it's valid Python code for a list of tuples
     response_content = response.split('[')[-1].split(']')[0]
     response_content = '[' + response_content + ']'
     
@@ -144,15 +113,53 @@ def extract_data_with_openai(table_data):
 def create_word_document(extracted_data, pdf_image_paths):
     new_doc = docx.Document()
     
+    # Add the header part of the invoice
+    header_lines = [
+    os.getenv("HEADER_LINE_1"),
+    os.getenv("HEADER_LINE_2"),
+    os.getenv("HEADER_LINE_3"),
+    os.getenv("HEADER_LINE_4")
+    ]
+    
+    for line in header_lines:
+        header_paragraph = new_doc.add_paragraph(line)
+        header_paragraph.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+        header_run = header_paragraph.runs[0]
+        header_run.font.size = Pt(11)
+        header_run.font.name = 'Courier'
+        header_paragraph.paragraph_format.line_spacing = 1
+    
+    new_doc.add_paragraph('')  # Add spacing after header
+
+    # Add the rest of the invoice content for each row in extracted_data
     for job_id, (description, billing) in enumerate(extracted_data, start=1):
-        page_content = invoice.invoice_string.replace('<<billing>>', str(billing)).replace('<<description>>', description).replace('<<job>>', str(job_id))
-        for line in page_content.split('\n'):
-            new_doc.add_paragraph(line)
+        description = description.upper()
+        
+        page_content = invoice.invoice_string.replace('<<billing>>', str(billing)) \
+                                             .replace('<<description>>', description) \
+                                             .replace('<<job>>', str(job_id))
+        
+        lines = page_content.split('\n')[5:]
+        for line in lines:
+            para = new_doc.add_paragraph(line)
+            if "INVOICE NO.:" in line or "DATE:" in line:
+                para.alignment = WD_PARAGRAPH_ALIGNMENT.RIGHT
+            elif "THANK YOU" in line:
+                para.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+            else:
+                para.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
+            
+            if para.runs:
+                run = para.runs[0]
+                run.font.size = Pt(9)
+                run.font.name = 'Courier'
+            para.paragraph_format.line_spacing = 1
+        
         new_doc.add_page_break()
     
+    # Handle PDF images if provided
     if pdf_image_paths:
-        new_doc.add_page_break()
-        new_doc.add_paragraph("Attached Images from PDF:")
+    
         for image_path in pdf_image_paths:
             new_doc.add_picture(image_path)
             new_doc.add_page_break()
@@ -186,8 +193,6 @@ def main():
     extracted_data = extract_data_with_openai(table_data)
     
     df = pd.DataFrame(extracted_data, columns=["Description", "Amount"])
-    
-    # Remove non-numeric characters and convert to numeric
     df['Amount'] = df['Amount'].replace('[\$,]', '', regex=True).astype(float)
 
     print(df)
@@ -199,6 +204,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 

@@ -121,8 +121,25 @@ class BillingAutomationGUI(QWidget):
 
 
     def select_excel_document(self):
-        # Add functionality to handle Excel document selection
-        pass
+        def run_select_excel():
+                try:
+                    logging.debug("Selecting excel file instead of starting with a PDF")
+                    result = subprocess.run([sys.executable, "select_excel.py"], capture_output=True, text=True)
+                    logging.debug(f"stdout: {result.stdout}")
+                    logging.debug(f"stderr: {result.stderr}")
+                    if result.returncode == 0:
+                        self.showMessageSignal.emit('Info', result.stdout, BillingAutomationGUI.ICON_INFORMATION)
+                    else:
+                        self.showMessageSignal.emit('Error', result.stderr, BillingAutomationGUI.ICON_CRITICAL)
+                except Exception as e:
+                    logging.error(f"Exception occurred: {str(e)}")
+                    self.showMessageSignal.emit('Exception', str(e), BillingAutomationGUI.ICON_CRITICAL)
+
+        threading.Thread(target=run_select_excel).start()
+
+
+        
+        
 
     @pyqtSlot(str, str, int)
     def show_message(self, title, message, icon):
