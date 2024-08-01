@@ -4,7 +4,8 @@ invoice.py
 app.log
 /output
 
-/__pycache__
+__pycache__/
+
 extracted_data.csv
 Formatted_Invoices.docx
 Formatted_Invoices_From_Excel.docx
