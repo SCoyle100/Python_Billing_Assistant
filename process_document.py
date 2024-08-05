@@ -93,9 +93,9 @@ def get_gpt_response(user_input):
 
 def extract_data_with_openai(table_data):
     prompt = (
-        "Extract the description and amounts columsn from the table, which is typically city names and prices, from the following text and return them as a Python list of tuples. If there is only 1 amount in the column, that means there is only 1 row.  If a description has multiple cities in it, but only 1 amount, then that description just happens to be a list of cities:\n"
+        "Extract the descriptions and their corresponding amounts from the table with pricing. Exclude any rows where the description is a general statement or does not directly correspond to an amount. The descriptions should not be long or complicated.  You should only look for the simple ones, such as a city name and the state abreviation.  Short, brief descriptions.  If there are no brief descriptions, then just use what makes sense.  Also, in the amounts column, if there are 2 items, and the descriptions column has like a long description of cities and dates and stuff, but then there is also just city name and state abbreviations, and there are 2 of them? There you go, we need that.  Simple descriptions correlating with the amounts:\n"
         f"{table_data}\n"
-        "Return only the list of tuples."
+        "Return only the list of tuples. Do not say anything else, just provide the list of tuples because your output is going to be read by a python script into a tuple. "
     )
     
     response = get_gpt_response(prompt)
@@ -120,7 +120,7 @@ def create_word_document(extracted_data, pdf_image_paths):
     os.getenv("HEADER_LINE_3"),
     os.getenv("HEADER_LINE_4")
     ]
-    
+
     for line in header_lines:
         header_paragraph = new_doc.add_paragraph(line)
         header_paragraph.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
@@ -142,7 +142,7 @@ def create_word_document(extracted_data, pdf_image_paths):
         lines = page_content.split('\n')[5:]
         for line in lines:
             para = new_doc.add_paragraph(line)
-            if "INVOICE NO.:" in line or "DATE:" in line:
+            if "INVOICE NO." in line or "DATE:" in line:
                 para.alignment = WD_PARAGRAPH_ALIGNMENT.RIGHT
             elif "THANK YOU" in line:
                 para.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
@@ -191,9 +191,23 @@ def main():
 
     table_data = read_word_file(word_file_path)
     extracted_data = extract_data_with_openai(table_data)
+
+    app = QApplication(sys.argv)
+    message = QMessageBox()
+    message.setWindowTitle("Extracted Data")
+    message.setText(f"Extracted Data:\n{extracted_data}")
+    message.setIcon(QMessageBox.Information)
+    message.exec_()
+
     
     df = pd.DataFrame(extracted_data, columns=["Description", "Amount"])
+
+    # Expand rows by splitting "Amount" column where there are newline characters
+    df = df.assign(Amount=df['Amount'].str.split('\n')).explode('Amount')
+
+    # Clean up any unwanted characters (like $) and convert to float
     df['Amount'] = df['Amount'].replace('[\$,]', '', regex=True).astype(float)
+
 
     print(df)
     df.to_csv("extracted_data.csv", index=False)

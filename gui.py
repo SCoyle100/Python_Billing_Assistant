@@ -25,13 +25,13 @@ class BillingAutomationGUI(QWidget):
         self.showMessageSignal.connect(self.show_message)
 
     def initUI(self):
-        self.setWindowTitle('Billing Automation')
+        self.setWindowTitle('Billing Assistant')
         self.setGeometry(100, 100, 800, 400)
         self.setStyleSheet("background-color: #2e2e2e; color: #ffffff;")
 
         layout = QVBoxLayout()
 
-        self.label = QLabel('Billing Automation')
+        self.label = QLabel('Billing Assistant')
         self.label.setFont(QFont('Arial', 18))
         self.label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.label)
@@ -63,6 +63,18 @@ class BillingAutomationGUI(QWidget):
         self.select_excel_button.setFont(QFont('Arial', 14))
         self.select_excel_button.setStyleSheet("background-color: #2196f3; color: #ffffff;")
         self.select_excel_button.clicked.connect(self.select_excel_document)
+        layout.addWidget(self.select_excel_button)
+
+        self.select_excel_button = QPushButton('Select Word document to create PDF image')
+        self.select_excel_button.setFont(QFont('Arial', 14))
+        self.select_excel_button.setStyleSheet("background-color: #2196f3; color: #ffffff;")
+        self.select_excel_button.clicked.connect(self.select_word_document_for_pdf_image)
+        layout.addWidget(self.select_excel_button)
+
+        self.select_excel_button = QPushButton('Select PDF to create image')
+        self.select_excel_button.setFont(QFont('Arial', 14))
+        self.select_excel_button.setStyleSheet("background-color: #2196f3; color: #ffffff;")
+        self.select_excel_button.clicked.connect(self.select_pdf_for_pdf_image)
         layout.addWidget(self.select_excel_button)
 
         self.setLayout(layout)
@@ -136,6 +148,40 @@ class BillingAutomationGUI(QWidget):
                     self.showMessageSignal.emit('Exception', str(e), BillingAutomationGUI.ICON_CRITICAL)
 
         threading.Thread(target=run_select_excel).start()
+
+    def select_word_document_for_pdf_image(self):
+        def run_select_word_for_pdf():
+                try:
+                    logging.debug("Selecting excel file instead of starting with a PDF")
+                    result = subprocess.run([sys.executable, "create_pdf_image.py"], capture_output=True, text=True)
+                    logging.debug(f"stdout: {result.stdout}")
+                    logging.debug(f"stderr: {result.stderr}")
+                    if result.returncode == 0:
+                        self.showMessageSignal.emit('Info', result.stdout, BillingAutomationGUI.ICON_INFORMATION)
+                    else:
+                        self.showMessageSignal.emit('Error', result.stderr, BillingAutomationGUI.ICON_CRITICAL)
+                except Exception as e:
+                    logging.error(f"Exception occurred: {str(e)}")
+                    self.showMessageSignal.emit('Exception', str(e), BillingAutomationGUI.ICON_CRITICAL)
+
+        threading.Thread(target=run_select_word_for_pdf).start()
+
+    def select_pdf_for_pdf_image(self):
+        def run_select_pdf_for_image():
+                try:
+                    logging.debug("Selecting excel file instead of starting with a PDF")
+                    result = subprocess.run([sys.executable, "create_pdf_image_from_pdf.py"], capture_output=True, text=True)
+                    logging.debug(f"stdout: {result.stdout}")
+                    logging.debug(f"stderr: {result.stderr}")
+                    if result.returncode == 0:
+                        self.showMessageSignal.emit('Info', result.stdout, BillingAutomationGUI.ICON_INFORMATION)
+                    else:
+                        self.showMessageSignal.emit('Error', result.stderr, BillingAutomationGUI.ICON_CRITICAL)
+                except Exception as e:
+                    logging.error(f"Exception occurred: {str(e)}")
+                    self.showMessageSignal.emit('Exception', str(e), BillingAutomationGUI.ICON_CRITICAL)
+
+        threading.Thread(target=run_select_pdf_for_image).start()        
 
 
         

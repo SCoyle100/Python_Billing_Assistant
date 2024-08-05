@@ -92,7 +92,7 @@ def create_word_document(extracted_data):
             para = new_doc.add_paragraph(line)
             
             # Align "INVOICE NO.: <<invoice>>" and "DATE: <<date>>" to the right
-            if "INVOICE NO.:" in line or "DATE:" in line:
+            if "INVOICE NO." in line or "DATE:" in line:
                 para.alignment = WD_PARAGRAPH_ALIGNMENT.RIGHT  # Right alignment for invoice and date
             elif "THANK YOU" in line:
                 para.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER  # Center alignment for THANK YOU
