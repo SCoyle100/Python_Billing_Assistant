@@ -50,9 +50,13 @@ if not input_path:
     sys.exit(1)
 
 docx_path = get_docx_path(input_path)
+
 converter = PDFConverter()
+
 client = OpenAI()
+
 load_dotenv()
+
 app = QApplication(sys.argv)
 
 converter.doc = win32.Dispatch("Word.Application").ActiveDocument
