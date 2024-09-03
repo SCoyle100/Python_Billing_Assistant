@@ -8,6 +8,7 @@ import logging
 import invoice  
 import os
 from dotenv import load_dotenv
+import re
 
 load_dotenv()
 
@@ -49,21 +50,26 @@ def process_selected_excel_file(excel_file_path):
     # Create the Word document with the extracted data
     create_word_document(extracted_data)
 
+
+def remove_day_suffix(date_string):
+    # This regex finds numbers followed by ST, TH, ND, or RD and removes the suffix
+    return re.sub(r'(\d+)(ST|TH|ND|RD)', r'\1', date_string, flags=re.IGNORECASE)
+
 def create_word_document(extracted_data):
     new_doc = docx.Document()
     
     # Add the rest of the invoice content for each row in extracted_data
     for invoice_number, ttc_number, description, billing, date in extracted_data:
-        # Convert description and date to uppercase
+        # Convert description to uppercase and correctly format the date
         description = description.upper()
-        date = date.replace("st", "").replace("ST", "").upper()
+        date = remove_day_suffix(date).upper()
         
         # Add and format the header part of the invoice_string
         header_lines = [
-        os.getenv("HEADER_LINE_1"),
-        os.getenv("HEADER_LINE_2"),
-        os.getenv("HEADER_LINE_3"),
-        os.getenv("HEADER_LINE_4")
+            os.getenv("HEADER_LINE_1"),
+            os.getenv("HEADER_LINE_2"),
+            os.getenv("HEADER_LINE_3"),
+            os.getenv("HEADER_LINE_4")
         ]
 
         for line in header_lines:
@@ -114,8 +120,7 @@ def create_word_document(extracted_data):
     new_doc.save('Formatted_Invoices_From_Excel.docx')
     logging.info("Formatted document saved as Formatted_Invoices_From_Excel.docx")
 
-
-
+    
 if __name__ == "__main__":
     select_excel_file()
 

@@ -74,6 +74,7 @@ class PDFConverter:
         return output_file_path
 
     def open_and_edit_docx(self, file_path):
+        
         self.word = win32.gencache.EnsureDispatch('Word.Application')
         self.word.Visible = True
         self.doc = self.word.Documents.Open(file_path)
@@ -165,9 +166,10 @@ def extract_data_with_openai(table_data):
 def split_large_amounts(amounts):
     new_amounts = []
     for amount in amounts:
-        # If the amount is a string, remove commas
+        # If the amount is a string, remove commas and dollar signs
         if isinstance(amount, str):
-            amount = amount.replace(',', '')
+            # Remove commas and dollar signs
+            amount = amount.replace(',', '').replace('$', '')
             try:
                 amount_float = float(amount)
             except ValueError:
@@ -193,6 +195,7 @@ def split_large_amounts(amounts):
     print("Final Processed Amounts: ", new_amounts)
 
     return new_amounts
+
 
 
 

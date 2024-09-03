@@ -3,6 +3,7 @@ from PyQt5.QtWidgets import QApplication, QMessageBox, QFileDialog
 import os
 import fitz  # PyMuPDF
 import logging
+from PIL import Image
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -19,14 +20,22 @@ def select_pdf_file():
         logging.error("No file selected")
         return None
 
-def convert_pdf_to_images(pdf_path):
+def resize_image(image_path, max_width=2550, max_height=3300):
+    with Image.open(image_path) as img:
+        img.thumbnail((max_width, max_height), Image.ANTIALIAS)
+        img.save(image_path)
+        logging.debug(f"Image resized: {image_path}")
+
+def convert_pdf_to_images(pdf_path, dpi=600):
     pdf_document = fitz.open(pdf_path)
     image_paths = []
     for page_num in range(len(pdf_document)):
         page = pdf_document.load_page(page_num)
-        pix = page.get_pixmap()
+        mat = fitz.Matrix(dpi / 72, dpi / 72)  # Keeps the same scaling but uses DPI directly
+        pix = page.get_pixmap(matrix=mat)
         output_image_path = f"pdf_page_image_{page_num}.png"
         pix.save(output_image_path)
+        resize_image(output_image_path)  # Resize the image after saving to ensure it fits on the page
         image_paths.append(output_image_path)
     logging.debug(f"PDF converted to images: {image_paths}")
     return image_paths
@@ -40,7 +49,7 @@ def main():
         print("No PDF document selected. Exiting.")
         return
     
-    pdf_image_paths = convert_pdf_to_images(pdf_path)
+    pdf_image_paths = convert_pdf_to_images(pdf_path, dpi=600)
     if pdf_image_paths:
         QMessageBox.information(None, 'Success', f'PDF converted to images:\n{pdf_image_paths}')
     else:
@@ -51,3 +60,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
