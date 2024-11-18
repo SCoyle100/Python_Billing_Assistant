@@ -60,20 +60,35 @@ def resize_image(image_path, max_width=2550, max_height=3300):
         img.save(image_path)
         logging.debug(f"Image resized: {image_path}")
 
+        
+
 def convert_pdf_to_images(pdf_path, dpi=600):
     pdf_document = fitz.open(pdf_path)
     image_paths = []
+
+    # Get the base name of the PDF file without extension
+    pdf_base_name = os.path.splitext(os.path.basename(pdf_path))[0]
+
     for page_num in range(len(pdf_document)):
         page = pdf_document.load_page(page_num)
+
         # Use the DPI directly to generate the image
         mat = fitz.Matrix(dpi / 72, dpi / 72)  # Keeps the same scaling but uses DPI directly
         pix = page.get_pixmap(matrix=mat)
-        output_image_path = f"pdf_page_image_{page_num}.png"
+
+        # Create the output image path with the PDF base name and page number
+        output_image_path = f"{pdf_base_name}_page_{page_num}.png"
+
+        # Save the image and resize it
         pix.save(output_image_path)
-        resize_image(output_image_path)  # Resize the image after saving to ensure it fits on the page
+        resize_image(output_image_path)
+
         image_paths.append(output_image_path)
+
     logging.debug(f"PDF converted to images: {image_paths}")
     return image_paths
+
+
 
 def main():
     # Initialize the QApplication
