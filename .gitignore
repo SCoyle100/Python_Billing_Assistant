@@ -1,6 +1,10 @@
 .env
 test.pdf
 invoice.py
+test_table_change_textshape.py
+test_table_count.py
+test_table_mod.py
+test_total.py
 app.log
 /output
 
@@ -9,6 +13,7 @@ __pycache__/
 extracted_data.csv
 Formatted_Invoices.docx
 Formatted_Invoices_From_Excel.docx
+
 input_path.txt
 
 temp_image.png
@@ -21,9 +26,6 @@ ocr_output.txt
 
 output.csv
 
-test_table_change_textshape.py
-test_table_count.py
-test_table_mod.py
-test_total.py
+
 
 
