@@ -20,3 +20,10 @@ ocr_output.txt
 ~$*
 
 output.csv
+
+test_table_change_textshape.py
+test_table_count.py
+test_table_mod.py
+test_total.py
+
+
