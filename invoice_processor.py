@@ -1,4 +1,3 @@
-# invoice_processor.py
 import os
 import cv2
 import numpy as np
@@ -24,6 +23,11 @@ def process_invoice():
     # Configure Tesseract path
     tesseract_cmd_path = r"D:\Tesseract\tesseract.exe"  # Adjust path as needed
     pytesseract.pytesseract.tesseract_cmd = tesseract_cmd_path
+
+    # Create "images" directory in the script's location
+    script_dir = os.path.dirname(__file__)
+    images_dir = os.path.join(script_dir, "images")
+    os.makedirs(images_dir, exist_ok=True)
 
     # OpenCV Cropping Part
     if not os.path.exists(input_file_path):
@@ -59,7 +63,7 @@ def process_invoice():
         y_max = max(y_max, y + h)
 
     cropped_image_array = image[y_min:y_max, x_min:x_max]
-    intermediate_path = "cropped_image.png"
+    intermediate_path = os.path.join(images_dir, "cropped_image.png")
     cv2.imwrite(intermediate_path, cropped_image_array)
     print(f"Intermediate cropped image saved at {intermediate_path}")
 
@@ -83,7 +87,7 @@ def process_invoice():
         )
         return resized_cropped_img
 
-    final_output_path = "cropped_image_final.png"
+    final_output_path = os.path.join(images_dir, "cropped_image_final.png")
     try:
         final_cropped_image = crop_whitespace_below_word(intermediate_path, word="total")
         final_cropped_image.save(final_output_path)
@@ -92,3 +96,7 @@ def process_invoice():
         print(f"Error during Tesseract processing: {e}")
 
     return final_output_path
+
+if __name__ == "__main__":
+    process_invoice()
+

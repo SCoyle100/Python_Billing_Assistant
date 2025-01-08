@@ -48,6 +48,10 @@ def process_pdf(file_path):
     """Process a PDF file by converting pages to images and cropping them."""
     pdf_document = fitz.open(file_path)
 
+    # Define the output directory and ensure it exists
+    output_dir = os.path.join(os.path.dirname(__file__), "images")
+    os.makedirs(output_dir, exist_ok=True)
+
     for page_num in range(len(pdf_document)):
         page = pdf_document[page_num]
 
@@ -61,10 +65,10 @@ def process_pdf(file_path):
         # Crop the image
         cropped_image = crop_image(image_np)
 
-        # Save the cropped image
+        # Save the cropped image in the "images" directory
         output_path = os.path.join(
-            os.path.dirname(file_path), 
-            f"cropped_page_{page_num + 1}.png"
+            output_dir, 
+            f"shutterstock_cropped_page_{page_num + 1}.png"
         )
         # Convert cropped image back to RGB before saving
         cropped_image_rgb = cv2.cvtColor(cropped_image, cv2.COLOR_BGR2RGB)
@@ -72,6 +76,10 @@ def process_pdf(file_path):
 
 def process_image(file_path):
     """Process a single image file for cropping."""
+    # Define the output directory and ensure it exists
+    output_dir = os.path.join(os.path.dirname(__file__), "images")
+    os.makedirs(output_dir, exist_ok=True)
+
     # Open the image file
     image = Image.open(file_path)
     image_np = np.array(image)
@@ -83,9 +91,9 @@ def process_image(file_path):
     # Crop the image
     cropped_image = crop_image(image_np)
 
-    # Save the cropped image
+    # Save the cropped image in the "images" directory
     output_path = os.path.join(
-        os.path.dirname(file_path), 
+        output_dir, 
         f"cropped_{os.path.basename(file_path)}"
     )
     # Convert cropped image back to RGB before saving

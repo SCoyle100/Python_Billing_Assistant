@@ -1,4 +1,4 @@
-# main_analysis.py
+
 import os
 import base64
 import json
@@ -24,7 +24,7 @@ def analyze_image_with_openai(image_path):
                 "content": [
                     {
                         "type": "text",
-                        "text": "Please provide the following columns from the table: invoice # and net invoice amount",
+                        "text": "Please provide the following columns from the table: invoice # and net invoice amount. Please ensure it is formatted like this example:- 112401: $1,300.00",
                     },
                     {
                         "type": "image_url",

@@ -49,7 +49,7 @@ class BillingAutomationGUI(QWidget):
         self.process_button.clicked.connect(self.process_document)
         layout.addWidget(self.process_button)
 
-        # Add spacer between the two sets of buttons
+        # Add spacer between the first and second sets of buttons
         layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
 
         # Second set of buttons
@@ -76,6 +76,19 @@ class BillingAutomationGUI(QWidget):
         self.select_excel_button.setStyleSheet("background-color: #2196f3; color: #ffffff;")
         self.select_excel_button.clicked.connect(self.select_pdf_for_pdf_image)
         layout.addWidget(self.select_excel_button)
+
+        # Add spacer between the second and third sets of buttons
+        layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
+
+        # Third set of buttons
+        self.confirm_payments_button = QPushButton('Confirm Payments')
+        self.confirm_payments_button.setFont(QFont('Arial', 14))
+        self.confirm_payments_button.setStyleSheet(
+            "background: qlineargradient(spread:pad, x1:0, y1:0.5, x2:1, y2:0.5, stop:0 #00ff00, stop:1 #ffffff);"
+            "color: #000000;"
+        )
+        self.confirm_payments_button.clicked.connect(self.confirm_payments)
+        layout.addWidget(self.confirm_payments_button)
 
         self.setLayout(layout)
 
@@ -181,7 +194,24 @@ class BillingAutomationGUI(QWidget):
                     logging.error(f"Exception occurred: {str(e)}")
                     self.showMessageSignal.emit('Exception', str(e), BillingAutomationGUI.ICON_CRITICAL)
 
-        threading.Thread(target=run_select_pdf_for_image).start()        
+        threading.Thread(target=run_select_pdf_for_image).start()     
+
+    def confirm_payments(self):
+        def run_confirm_payments():
+            try:
+                logging.debug("Running confirm payments")
+                result = subprocess.run([sys.executable, "vision_payments.py"], capture_output=True, text=True)
+                logging.debug(f"stdout: {result.stdout}")
+                logging.debug(f"stderr: {result.stderr}")
+                if result.returncode == 0:
+                    self.showMessageSignal.emit('Info', result.stdout, BillingAutomationGUI.ICON_INFORMATION)
+                else:
+                    self.showMessageSignal.emit('Error', result.stderr, BillingAutomationGUI.ICON_CRITICAL)
+            except Exception as e:
+                logging.error(f"Exception occurred: {str(e)}")
+                self.showMessageSignal.emit('Exception', str(e), BillingAutomationGUI.ICON_CRITICAL)
+
+        threading.Thread(target=run_confirm_payments).start()       
 
 
         
