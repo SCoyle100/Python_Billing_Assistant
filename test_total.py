@@ -56,8 +56,8 @@ def split_large_amounts_and_format(input_path, output_path):
     print(f"Modified document saved as {output_path}")
 
 # Define input and output file paths
-input_file = "D:\Programming\Billing_PDF_Automation\output\Thompson Tractor-4Q #1835 November 2024 Media Reconciliation Invoice_modified.docx"  # Replace with the path to your input file
-output_file = "D:\Programming\Billing_PDF_Automation\output\Thompson Tractor-4Q #1835 November 2024 Media Reconciliation Invoice_modified_final.docx"  # Replace with the desired output file path
+input_file = ""  # Replace with the path to your input file
+output_file = ""  # Replace with the desired output file path
 
 # Apply the function
 split_large_amounts_and_format(input_file, output_file)
