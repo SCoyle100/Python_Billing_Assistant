@@ -57,13 +57,13 @@ def remove_day_suffix(date_string):
 
 def create_word_document(extracted_data):
     new_doc = docx.Document()
-    
+
     # Add the rest of the invoice content for each row in extracted_data
     for invoice_number, ttc_number, description, billing, date in extracted_data:
         # Convert description to uppercase and correctly format the date
         description = description.upper()
         date = remove_day_suffix(date).upper()
-        
+
         # Add and format the header part of the invoice_string
         header_lines = [
             os.getenv("HEADER_LINE_1"),
@@ -78,10 +78,10 @@ def create_word_document(extracted_data):
             header_run = header_paragraph.runs[0]
             header_run.font.size = Pt(11)  # Set font size to 11 for the header
             header_run.font.name = 'Courier'  # Set font to Courier
-            
+
             # Set line spacing to single
             header_paragraph.paragraph_format.line_spacing = 1
-        
+
         # Add an empty paragraph for spacing
         new_doc.add_paragraph('')
 
@@ -91,12 +91,12 @@ def create_word_document(extracted_data):
         page_content = page_content.replace('<<description>>', description)
         page_content = page_content.replace('<<billing>>', billing)
         page_content = page_content.replace('<<date>>', date)
-        
+
         # Skip the header part that was already added and process the rest of the content
         lines = page_content.split('\n')[5:]
         for line in lines:
             para = new_doc.add_paragraph(line)
-            
+
             # Align "INVOICE NO.: <<invoice>>" and "DATE: <<date>>" to the right
             if "INVOICE NO." in line or "DATE:" in line:
                 para.alignment = WD_PARAGRAPH_ALIGNMENT.RIGHT  # Right alignment for invoice and date
@@ -104,22 +104,26 @@ def create_word_document(extracted_data):
                 para.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER  # Center alignment for THANK YOU
             else:
                 para.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT  # Left alignment for other content
-            
+
             if para.runs:
                 run = para.runs[0]
                 run.font.size = Pt(9)  # Set font size to 9 for the content
                 run.font.name = 'Courier'  # Set font to Courier
-            
+
             # Set line spacing to single
             para.paragraph_format.line_spacing = 1
-        
+
         # Add a page break after processing each row's content
         new_doc.add_page_break()
-    
-    # Save the document
-    new_doc.save('Formatted_Invoices_From_Excel.docx')
-    logging.info("Formatted document saved as Formatted_Invoices_From_Excel.docx")
 
+    # Ensure the /output directory exists
+    output_dir = os.path.join(os.getcwd(), 'output')
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Save the document in the /output directory
+    output_path = os.path.join(output_dir, 'Formatted_Invoices_From_Excel.docx')
+    new_doc.save(output_path)
+    logging.info(f"Formatted document saved as {output_path}")
     
 if __name__ == "__main__":
     select_excel_file()

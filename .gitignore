@@ -30,5 +30,8 @@ ocr_output.txt
 output.csv
 
 
+*.docx
+*.pdf
+*.png
 
 
