@@ -117,7 +117,7 @@ def create_word_document(extracted_data):
         new_doc.add_page_break()
 
     # Ensure the /output directory exists
-    output_dir = os.path.join(os.getcwd(), 'output')
+    output_dir = os.path.join(os.getcwd(), 'final invoice output')
     os.makedirs(output_dir, exist_ok=True)
 
     # Save the document in the /output directory
