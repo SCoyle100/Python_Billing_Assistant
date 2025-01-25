@@ -40,20 +40,47 @@ desired_date_format = get_user_date()
 # Configure DSPy with your OpenAI API key
 dspy.configure(lm=dspy.LM('openai/gpt-4o'))
 
+
+def refine_city_name(market):
+    try:
+        response = city_extractor(text=market)
+        return response.city.strip()
+    except Exception as e:
+        logging.warning(f"Failed to refine city name: {e}")
+        return market
+
+
+
+
 # Define DSPy signature with the user-provided date format
 class ExtractInvoiceInfo(dspy.Signature):
     """
-    Extract invoice information.
+    Extract invoice information, including market (city name only).
 
     """.format(date_format=desired_date_format)
     
     text: str = dspy.InputField()
     invoices: list[dict[str, str]] = dspy.OutputField(
-        desc="List of invoices, each with keys: Invoice No., TTC Number, Description, Amount, Date"
+        desc="List of invoices, each with keys: Invoice No., TTC Number, Description, Amount, Date, Market"
     )
+
 
 # Initialize the DSPy prediction module for extracting invoice info
 invoice_extractor = dspy.Predict(ExtractInvoiceInfo)
+
+
+
+class ExtractCityOnly(dspy.Signature):
+    """
+    Extract only the city name from a market field.
+    """
+    text: str = dspy.InputField()
+    city: str = dspy.OutputField(desc="City name extracted from market field")
+
+city_extractor = dspy.Predict(ExtractCityOnly)
+
+
+
 
 def select_eml_file():
     options = QFileDialog.Options()
@@ -120,12 +147,12 @@ def process_selected_eml_file(eml_file_path):
 
 def extract_structured_data_from_email(email_body):
     try:
-        # Use the DSPy module to extract invoice information
+        # Use DSPy to extract invoice information
         response = invoice_extractor(text=email_body)
-        
+
         # Extract the list of invoices from the DSPy response
         structured_data = response.invoices
-        
+
         # Convert list of dicts to list of tuples in expected order
         extracted_data = [
             (
@@ -133,28 +160,29 @@ def extract_structured_data_from_email(email_body):
                 invoice.get("TTC Number", ""),
                 invoice.get("Description", ""),
                 invoice.get("Amount", ""),
-                invoice.get("Date", "")
+                invoice.get("Date", ""),
+                refine_city_name(invoice.get("Market", "")) # Extract the market (city name) if provided
             )
             for invoice in structured_data
         ]
-        
+
         # Filter out duplicate invoices based on numeric portion only
         seen_numbers = set()
         unique_data = []
-        for invoice_no, ttc_number, description, amount, date in extracted_data:
+        for invoice_no, ttc_number, description, amount, date, market in extracted_data:
             # Extract numeric portion of the invoice number
             numeric_part = re.match(r'(\d+)', invoice_no.strip())
             if numeric_part:
                 num = numeric_part.group(1)
                 if num not in seen_numbers:
                     seen_numbers.add(num)
-                    unique_data.append((invoice_no, ttc_number, description, amount, date))
+                    unique_data.append((invoice_no, ttc_number, description, amount, date, market))
                 else:
                     logging.warning(f"Duplicate invoice found and skipped: {invoice_no}")
             else:
                 # If no numeric part, include the invoice as-is
-                unique_data.append((invoice_no, ttc_number, description, amount, date))
-        
+                unique_data.append((invoice_no, ttc_number, description, amount, date, market))
+
         return unique_data
     except Exception as e:
         logging.error(f"Error during DSPy extraction: {e}")
@@ -167,7 +195,8 @@ def remove_day_suffix(date_string):
 def create_word_document(extracted_data):
     new_doc = docx.Document()
 
-    for invoice_number, ttc_number, description, amount, date in extracted_data:
+    # Unpack only the first five values and ignore the sixth (market)
+    for invoice_number, ttc_number, description, amount, date, _ in extracted_data:
         description = description.upper()
         date = remove_day_suffix(date).upper()
 
@@ -226,7 +255,7 @@ def save_invoices_to_db(invoices):
         conn = sqlite3.connect('invoices.db')
         cursor = conn.cursor()
 
-        # Create table if it doesn't exist, including batch_id
+        # Create table if it doesn't exist, including the 'market' column
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS invoices (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -235,7 +264,8 @@ def save_invoices_to_db(invoices):
                 ttc_number TEXT,
                 description TEXT,
                 amount TEXT,
-                date TEXT
+                date TEXT,
+                market TEXT
             );
         """)
 
@@ -243,11 +273,11 @@ def save_invoices_to_db(invoices):
         batch_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
         # Insert each invoice record with the batch_id into the table
-        for invoice_no, ttc_number, description, amount, date in invoices:
+        for invoice_no, ttc_number, description, amount, date, market in invoices:
             cursor.execute("""
-                INSERT INTO invoices (batch_id, invoice_no, ttc_number, description, amount, date)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (batch_id, invoice_no, ttc_number, description, amount, date))
+                INSERT INTO invoices (batch_id, invoice_no, ttc_number, description, amount, date, market)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (batch_id, invoice_no, ttc_number, description, amount, date, market))
 
         # Commit changes and close connection
         conn.commit()
