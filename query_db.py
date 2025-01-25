@@ -14,7 +14,7 @@ def connect_db(db_path='invoices.db'):
 def read_all_invoices(conn):
     """Query and return all invoice records."""
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM invoices;")
+    cursor.execute("SELECT * FROM invoices;")  # Ensure this includes the `market` column
     rows = cursor.fetchall()
     return rows
 
@@ -32,11 +32,11 @@ def print_invoices(rows):
         return
 
     # Print header
-    print(f"{'ID':<5} {'Batch_ID':<20} {'Invoice_No':<15} {'TTC_Number':<15} {'Description':<30} {'Amount':<10} {'Date':<15}")
-    print("-" * 110)
+    print(f"{'ID':<5} {'Batch_ID':<20} {'Invoice_No':<15} {'TTC_Number':<15} {'Description':<30} {'Amount':<10} {'Date':<15} {'Market':<15}")
+    print("-" * 125)
     for row in rows:
-        id, batch_id, invoice_no, ttc_number, description, amount, date = row
-        print(f"{id:<5} {batch_id:<20} {invoice_no:<15} {ttc_number:<15} {description:<30} {amount:<10} {date:<15}")
+        id, batch_id, invoice_no, ttc_number, description, amount, date, market = row
+        print(f"{id:<5} {batch_id:<20} {invoice_no:<15} {ttc_number:<15} {description:<30} {amount:<10} {date:<15} {market:<15}")
 
 def main():
     parser = argparse.ArgumentParser(description="Query invoices from the SQLite database.")
@@ -57,3 +57,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
