@@ -19,7 +19,7 @@ import invoice  # Ensure your invoice template module is imported
 
 from pdf_to_docx_ import PDFConverter
 
-from database_functions import (
+from database.database_functions import (
     save_invoices_to_db,
     BATCH_ID,
 
@@ -34,6 +34,9 @@ from vendor_invoice_logic.matrix_media_dataframe import (
     
     
 )
+
+
+
 
 
 #from vendor_invoice_logic.capitol_media_logic import split_large_amounts_and_format
@@ -243,7 +246,9 @@ def create_word_document():
 
 
      # Connect to the SQLite database
-    db_path = os.path.join(os.getcwd(), 'invoice.db')
+    db_dir = os.path.join(os.getcwd(), 'database')
+    os.makedirs(db_dir, exist_ok=True)
+    db_path = os.path.join(db_dir, 'invoice.db')
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
