@@ -323,7 +323,7 @@ def handle_vendor_identification(pdf_file_path):
                 source="Capitol Media",
                 #docx_file_path=docx_file_path
             )
-            images = create_images_from_docx(docx_file_path, vendor_name, enhanced_invoices)
+            images = create_images_from_docx(docx_file_path, vendor_name, enhanced_invoices, page_to_market)
             #if images:
             #    DOCX_IMAGES_MAP[docx_file_path] = images
             #    logging.info(f"Created {len(images)} images for {docx_file_path}.")
