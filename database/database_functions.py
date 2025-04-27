@@ -38,6 +38,8 @@ def ensure_invoices_table_exists(cursor):
             amount TEXT,
             date TEXT,
             market TEXT,
+            service_period TEXT,
+            description TEXT,
             docx_file_path TEXT
         );
     """)
@@ -242,7 +244,27 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
     logging.info(f"Sorted invoices by market name: {[market for market, _ in sorted_invoices]}")
     
     # Process each invoice in the sorted order
-    for idx, (normalized_desc, amt) in enumerate(sorted_invoices):
+    for idx, invoice_item in enumerate(sorted_invoices):
+        # Handle different invoice data structures (tuples of different lengths)
+        if len(invoice_item) == 2:
+            normalized_desc, amt = invoice_item
+            service_period = ""
+            description = ""
+        elif len(invoice_item) >= 3:
+            # Handle case with ServicePeriod and/or Description
+            if len(invoice_item) == 3:
+                normalized_desc, amt, service_period = invoice_item
+                description = ""
+            elif len(invoice_item) >= 4:
+                normalized_desc, amt, service_period, description = invoice_item[:4]
+            else:
+                normalized_desc, amt = invoice_item[:2]
+                service_period = ""
+                description = ""
+        else:
+            # Fallback for unexpected formats
+            logging.error(f"Unexpected invoice format: {invoice_item}")
+            continue
         # Special handling for Fort Payne - always use the same invoice number
         if source == "Matrix Media" and normalized_desc == "Fort Payne":
             if fort_payne_invoice:
@@ -284,13 +306,32 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
         # Add to our enhanced invoices list
         enhanced_invoices.append((normalized_desc, amt, current_invoice_no))
         
+        # Get service_period and description if available in enhanced_invoices
+        service_period = ""
+        description = ""
+        for item in invoices:
+            if len(item) >= 3:
+                orig_desc, amt, *extra_fields = item
+                if orig_desc == normalized_desc:
+                    # If the original tuple has service period and description
+                    if len(extra_fields) >= 2:
+                        service_period = extra_fields[0] if extra_fields[0] is not None else ""
+                        description = extra_fields[1] if extra_fields[1] is not None else ""
+                        break
+                    # If we're using the matrix media dataframe structure
+                    elif isinstance(item, tuple) and hasattr(item, '_asdict'):
+                        item_dict = item._asdict()
+                        service_period = item_dict.get('ServicePeriod', '')
+                        description = item_dict.get('Description', '')
+                        break
+                    
         # Insert into the database
         cursor.execute(
             """
-            INSERT INTO invoices (batch_id, invoice_no, vendor, amount, date, market, docx_file_path)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO invoices (batch_id, invoice_no, vendor, amount, date, market, service_period, description, docx_file_path)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (batch_id, current_invoice_no, source, formatted_amount, today_str, normalized_desc, docx_file_path)
+            (batch_id, current_invoice_no, source, formatted_amount, today_str, normalized_desc, service_period, description, docx_file_path)
         )
     
     # Print the market-to-invoice mapping for debugging
