@@ -41,7 +41,7 @@ from vendor_invoice_logic.capitol_media_logic import split_large_amounts_and_for
 from vendor_invoice_logic.capitol_media_dataframe_1 import build_dataframe_from_capitol_media
 
 
-from create_pdf_image import create_images_from_docx
+from image_generation.create_pdf_image import create_images_from_docx
 
 
 #from vendor_invoice_logic.capitol_media_logic import split_large_amounts_and_format

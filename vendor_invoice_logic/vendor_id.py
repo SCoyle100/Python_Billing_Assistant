@@ -5,7 +5,7 @@ import logging
 import base64
 from openai import OpenAI
 
-from create_pdf_image_from_pdf import convert_pdf_to_images
+from image_generation.create_pdf_image_from_pdf import convert_pdf_to_images
 
 # Import performance and caching utilities if available
 try:

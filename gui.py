@@ -170,7 +170,7 @@ class BillingAutomationGUI(QWidget):
         def run_select_word_for_pdf():
                 try:
                     logging.debug("Selecting excel file instead of starting with a PDF")
-                    result = subprocess.run([sys.executable, "create_pdf_image.py"], capture_output=True, text=True)
+                    result = subprocess.run([sys.executable, "image_generation/create_pdf_image.py"], capture_output=True, text=True)
                     logging.debug(f"stdout: {result.stdout}")
                     logging.debug(f"stderr: {result.stderr}")
                     if result.returncode == 0:
@@ -187,7 +187,7 @@ class BillingAutomationGUI(QWidget):
         def run_select_pdf_for_image():
                 try:
                     logging.debug("Selecting excel file instead of starting with a PDF")
-                    result = subprocess.run([sys.executable, "create_pdf_image_from_pdf.py"], capture_output=True, text=True)
+                    result = subprocess.run([sys.executable, "image_generation/create_pdf_image_from_pdf.py"], capture_output=True, text=True)
                     logging.debug(f"stdout: {result.stdout}")
                     logging.debug(f"stderr: {result.stderr}")
                     if result.returncode == 0:
@@ -204,7 +204,7 @@ class BillingAutomationGUI(QWidget):
         def run_confirm_payments():
             try:
                 logging.debug("Running confirm payments")
-                result = subprocess.run([sys.executable, "vision_payments.py"], capture_output=True, text=True)
+                result = subprocess.run([sys.executable, "image_generation/vision_payments.py"], capture_output=True, text=True)
                 logging.debug(f"stdout: {result.stdout}")
                 logging.debug(f"stderr: {result.stderr}")
                 if result.returncode == 0:
@@ -584,7 +584,7 @@ class BillingAutomationGUI(QWidget):
         def run_select_word_for_pdf():
             try:
                 logging.debug("Selecting excel file instead of starting with a PDF")
-                result = subprocess.run([sys.executable, "create_pdf_image.py"], capture_output=True, text=True)
+                result = subprocess.run([sys.executable, "image_generation/create_pdf_image.py"], capture_output=True, text=True)
                 logging.debug(f"stdout: {result.stdout}")
                 logging.debug(f"stderr: {result.stderr}")
                 if result.returncode == 0:
@@ -609,7 +609,7 @@ class BillingAutomationGUI(QWidget):
         def run_select_pdf_for_image():
             try:
                 logging.debug("Selecting excel file instead of starting with a PDF")
-                result = subprocess.run([sys.executable, "create_pdf_image_from_pdf.py"], capture_output=True, text=True)
+                result = subprocess.run([sys.executable, "image_generation/create_pdf_image_from_pdf.py"], capture_output=True, text=True)
                 logging.debug(f"stdout: {result.stdout}")
                 logging.debug(f"stderr: {result.stderr}")
                 if result.returncode == 0:
@@ -634,7 +634,7 @@ class BillingAutomationGUI(QWidget):
         def run_confirm_payments():
             try:
                 logging.debug("Running confirm payments")
-                result = subprocess.run([sys.executable, "vision_payments.py"], capture_output=True, text=True)
+                result = subprocess.run([sys.executable, "image_generation/vision_payments.py"], capture_output=True, text=True)
                 logging.debug(f"stdout: {result.stdout}")
                 logging.debug(f"stderr: {result.stderr}")
                 if result.returncode == 0:
