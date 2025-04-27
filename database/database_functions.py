@@ -265,7 +265,11 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
     # Sort invoices alphabetically by market name
     sorted_invoices = sorted(normalized_invoices, key=lambda x: x[0].lower())
     
-    logging.info(f"Sorted invoices by market name: {[market for market, _ in sorted_invoices]}")
+    # Extract just the market names for logging, handling tuples of different lengths
+    market_names = []
+    for invoice_item in sorted_invoices:
+        market_names.append(invoice_item[0] if len(invoice_item) > 0 else "Unknown")
+    logging.info(f"Sorted invoices by market name: {market_names}")
     
     # Process each invoice in the sorted order
     for idx, invoice_item in enumerate(sorted_invoices):
@@ -361,7 +365,10 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
     # Print the market-to-invoice mapping for debugging
     logging.info("=== MARKET TO INVOICE MAPPING ===")
     for market, invoices in market_invoice_map.items():
-        logging.info(f"{market}: {', '.join(invoices)}")
+        if invoices:
+            logging.info(f"{market}: {', '.join(invoices)}")
+        else:
+            logging.info(f"{market}: No invoices")
     logging.info("=================================")
     
     # Commit changes and close connection
