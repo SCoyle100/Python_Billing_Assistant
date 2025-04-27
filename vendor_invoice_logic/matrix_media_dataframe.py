@@ -48,9 +48,11 @@ def build_dataframe_from_word_document(file_path):
             if num_cols == 0:
                 continue
 
-            # Find the column indices for Market and Amount (if they exist)
+            # Find the column indices for Market, Amount, Service Period, and Description (if they exist)
             market_col_index = None
             amount_col_index = None
+            service_period_col_index = None
+            description_col_index = None
 
             for col_idx in range(1, num_cols + 1):
                 header_text = table.Cell(1, col_idx).Range.Text.strip()
@@ -58,6 +60,10 @@ def build_dataframe_from_word_document(file_path):
                     market_col_index = col_idx
                 elif "Amount" in header_text:
                     amount_col_index = col_idx
+                elif "Service Period" in header_text:
+                    service_period_col_index = col_idx
+                elif "Description" in header_text:
+                    description_col_index = col_idx
 
             # If we didn't find both required columns, skip this table
             if market_col_index is None or amount_col_index is None:
@@ -88,20 +94,85 @@ def build_dataframe_from_word_document(file_path):
                     parsed_value = parse_dollar_amount(original_amount)
                     total_amount += parsed_value
 
+                # Special handling for Fort Payne - normalize at the source
+                final_market_value = market_value
+                # More comprehensive Fort Payne detection
+                if (market_value.lower().replace(' ', '').replace('.', '') in ['fortpayne', 'ftpayne'] or
+                    'fort payne' in market_value.lower() or 
+                    'ft payne' in market_value.lower() or 
+                    'ft. payne' in market_value.lower()):
+                    final_market_value = 'Fort Payne'
+                    print(f"Normalized '{market_value}' to 'Fort Payne'")
+                
+                # Read the "Service Period" cell if available
+                service_period_value = ""
+                if service_period_col_index is not None:
+                    service_period_cell = table.Cell(row_idx, service_period_col_index).Range.Text.strip()
+                    service_period_value = service_period_cell.replace("\r", "").replace("\n", "")
+                
+                # Read the "Description" cell if available
+                description_value = ""
+                if description_col_index is not None:
+                    description_cell = table.Cell(row_idx, description_col_index).Range.Text.strip()
+                    description_value = description_cell.replace("\r", "").replace("\n", "")
+                
                 # Store this row in our collections
                 rows_list.append({
-                    "Market": market_value,
-                    "Amount": total_amount
+                    "Market": final_market_value,
+                    "Amount": total_amount,
+                    "ServicePeriod": service_period_value,
+                    "Description": description_value
                 })
 
-        # Create a DataFrame
+        # Create a DataFrame - ensure ServicePeriod and Description columns exist
         df = pd.DataFrame(rows_list)
-
+        
+        # If ServicePeriod or Description columns don't exist, add them with empty values
+        if 'ServicePeriod' not in df.columns:
+            df['ServicePeriod'] = ""
+        if 'Description' not in df.columns:
+            df['Description'] = ""
+        
+        # Print pre-normalization DataFrame for debugging
+        print("DEBUG: Pre-normalization dataframe:")
+        print(df)
+        
         # Normalize "Ft. Payne" and "Fort Payne" to a single "Fort Payne" spelling
-        # Then group by Market to sum any duplicate rows
+        # But DON'T group other markets - we want to preserve multiple entries for markets like Conyers
         df['Market'] = df['Market'].str.replace(r'(?i)Ft\.?\s+Payne', 'Fort Payne', regex=True)
         df['Market'] = df['Market'].str.replace(r'(?i)Fort\s+Payne', 'Fort Payne', regex=True)
-        df = df.groupby('Market', as_index=False)['Amount'].sum()
+        
+        # Additional normalization to ensure all Fort Payne variants are captured
+        df['Market'] = df.apply(
+            lambda row: 'Fort Payne' 
+            if row['Market'].lower().replace(' ', '').replace('.', '') in ['fortpayne', 'ftpayne'] 
+            else row['Market'], 
+            axis=1
+        )
+        
+        # Create a temporary column to identify Fort Payne rows
+        df['is_fort_payne'] = df['Market'] == 'Fort Payne'
+        
+        # Group ONLY Fort Payne entries, leave other markets as separate entries
+        fort_payne_group = df[df['is_fort_payne']].groupby('Market', as_index=False)['Amount'].sum()
+        other_markets = df[~df['is_fort_payne']].drop(columns=['is_fort_payne'])
+        
+        # Combine the grouped Fort Payne with ungrouped other markets
+        if not fort_payne_group.empty:
+            fort_payne_group['is_fort_payne'] = True  # Add back the column
+            combined_df = pd.concat([fort_payne_group, other_markets], ignore_index=True)
+        else:
+            combined_df = other_markets
+            
+        # Clean up the final DataFrame
+        if 'is_fort_payne' in combined_df.columns:
+            combined_df = combined_df.drop(columns=['is_fort_payne'])
+            
+        # Print post-processing DataFrame for debugging
+        print("DEBUG: Post-processing dataframe (Fort Payne grouped, others preserved):")
+        print(combined_df)
+        
+        df = combined_df
 
         return df
     finally:
@@ -111,65 +182,7 @@ def build_dataframe_from_word_document(file_path):
 
 
 
-'''
-def save_dataframe_to_db(df):
-    """
-    Saves rows from the dataframe to the SQLite database 'invoice.db'.
-    Each row will create a new invoice record with an incremented invoice number.
-    The 'vendor' column is always set to 'Matrix Media'.
-    The 'date' column is set to today's date.
-    """
-    try:
-        conn = sqlite3.connect('invoice.db')
-        cursor = conn.cursor()
 
-        # Create table if it doesn't exist
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS invoices (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                batch_id TEXT,
-                invoice_no TEXT,
-                vendor TEXT,
-                amount TEXT,
-                date TEXT,
-                market TEXT
-            );
-        """)
-
-        # Create a unique batch_id for this run
-        batch_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-
-        # Get the last invoice number in the database, so we can increment
-        last_inv_no = get_last_invoice_number(cursor)
-
-        # Insert each row with its own incremented invoice number
-        for idx, row in df.iterrows():
-            # increment from the last used invoice number
-            if idx == 0:
-                this_invoice_no = increment_invoice_number(last_inv_no, "112481-M")
-            else:
-                this_invoice_no = increment_invoice_number(this_invoice_no, "112481-M")
-
-            cursor.execute("""
-                INSERT INTO invoices (batch_id, invoice_no, vendor, amount, date, market)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (
-                batch_id,
-                this_invoice_no,
-                "Matrix Media",
-                f"{row['Amount']:.2f}",
-                datetime.date.today().strftime("%Y-%m-%d"),
-                row['Market']
-            ))
-
-        conn.commit()
-        conn.close()
-
-        logging.info(f"Data saved to SQLite database with batch_id {batch_id}.")
-
-    except Exception as e:
-        logging.error(f"Failed to save to database: {e}")
-'''
 
 
 if __name__ == "__main__":

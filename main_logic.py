@@ -246,12 +246,27 @@ def handle_vendor_identification(pdf_file_path):
             print("DEBUG: DataFrame contents before converting to invoice list:")
             print(df_invoices)
             
-            # Convert DataFrame rows to a list of (Market, Amount) tuples
-            invoices_list = list(df_invoices[['Market', 'Amount']].itertuples(index=False, name=None))
+            # Check if the DataFrame contains ServicePeriod and Description columns
+            columns_to_include = ['Market', 'Amount']
+            if 'ServicePeriod' in df_invoices.columns:
+                columns_to_include.append('ServicePeriod')
+            if 'Description' in df_invoices.columns:
+                columns_to_include.append('Description')
+                
+            # Convert DataFrame rows to tuples with available columns
+            invoices_list = list(df_invoices[columns_to_include].itertuples(index=False, name=None))
             
             print("DEBUG: Invoice list before saving to DB:")
-            for market, amount in invoices_list:
-                print(f"Market: '{market}', Amount: {amount}")
+            for invoice_tuple in invoices_list:
+                if len(invoice_tuple) == 2:
+                    market, amount = invoice_tuple
+                    print(f"Market: '{market}', Amount: {amount}")
+                elif len(invoice_tuple) == 3:
+                    market, amount, service_period = invoice_tuple
+                    print(f"Market: '{market}', Amount: {amount}, Service Period: '{service_period}'")
+                elif len(invoice_tuple) == 4:
+                    market, amount, service_period, description = invoice_tuple
+                    print(f"Market: '{market}', Amount: {amount}, Service Period: '{service_period}', Description: '{description}'")
             
             # Save to database and get enhanced invoice data with invoice numbers
             enhanced_invoices = save_invoices_to_db(
@@ -262,8 +277,13 @@ def handle_vendor_identification(pdf_file_path):
             )
 
             print("DEBUG: Enhanced invoices after DB save:")
-            for market, amount, inv_no in enhanced_invoices:
-                print(f"Market: '{market}', Amount: {amount}, Invoice: {inv_no}")
+            for enhanced_invoice in enhanced_invoices:
+                if len(enhanced_invoice) == 3:
+                    market, amount, inv_no = enhanced_invoice
+                    print(f"Market: '{market}', Amount: {amount}, Invoice: {inv_no}")
+                elif len(enhanced_invoice) == 5:
+                    market, amount, inv_no, service_period, description = enhanced_invoice
+                    print(f"Market: '{market}', Amount: {amount}, Invoice: {inv_no}, Service Period: '{service_period}', Description: '{description}'")
             
             print("DEBUG: Page to market mapping:")
             for page, market in page_to_market.items():
