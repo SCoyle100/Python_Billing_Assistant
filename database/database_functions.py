@@ -229,14 +229,38 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
     
     # First, normalize all market descriptions and prepare for sorting
     normalized_invoices = []
-    for idx, (desc, amt) in enumerate(invoices):
+    for idx, invoice_item in enumerate(invoices):
+        # Handle different invoice structures
+        if len(invoice_item) == 2:
+            desc, amt = invoice_item
+            service_period = ""
+            description = ""
+        elif len(invoice_item) >= 3:
+            if len(invoice_item) == 3:
+                desc, amt, service_period = invoice_item
+                description = ""
+            elif len(invoice_item) >= 4:
+                desc, amt, service_period, description = invoice_item[:4]
+            else:
+                desc, amt = invoice_item[:2]
+                service_period = ""
+                description = ""
+        else:
+            # Skip unexpected formats
+            logging.error(f"Unexpected invoice format: {invoice_item}")
+            continue
+            
         # Normalize Fort Payne to consistent name
         if source == "Matrix Media" and is_fort_payne(desc):
             normalized_desc = "Fort Payne"
         else:
             normalized_desc = desc.strip()
         
-        normalized_invoices.append((normalized_desc, amt))
+        # Add all available fields to the normalized invoice
+        if service_period or description:
+            normalized_invoices.append((normalized_desc, amt, service_period, description))
+        else:
+            normalized_invoices.append((normalized_desc, amt))
     
     # Sort invoices alphabetically by market name
     sorted_invoices = sorted(normalized_invoices, key=lambda x: x[0].lower())
