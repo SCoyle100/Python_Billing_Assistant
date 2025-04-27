@@ -262,8 +262,21 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
         else:
             normalized_invoices.append((normalized_desc, amt))
     
-    # Sort invoices alphabetically by market name
-    sorted_invoices = sorted(normalized_invoices, key=lambda x: x[0].lower())
+    # Sort invoices alphabetically by market name with service period as secondary key
+    # This ensures that markets with the same name but different service periods remain distinct
+    def sort_key(x):
+        # Primary key: Market name (always first element)
+        market = x[0].lower() if x[0] else ""
+        
+        # Secondary key: Service period (third element if it exists)
+        service_period = ""
+        if len(x) >= 3:
+            service_period = x[2].lower() if x[2] else ""
+            
+        return (market, service_period)
+    
+    # Sort using both market and service period
+    sorted_invoices = sorted(normalized_invoices, key=sort_key)
     
     # Extract just the market names for logging, handling tuples of different lengths
     market_names = []
@@ -322,11 +335,17 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
             
             logging.info(f"Created invoice number {current_invoice_no} for market: {normalized_desc}")
             
-        # Track invoices assigned to each market (for debugging)
-        if normalized_desc in market_invoice_map:
-            market_invoice_map[normalized_desc].append(current_invoice_no)
+        # Create a composite key with market + service period for tracking
+        # This ensures markets with the same name but different service periods are tracked separately
+        composite_key = normalized_desc
+        if service_period:
+            composite_key = f"{normalized_desc} ({service_period})"
+            
+        # Track invoices assigned to each market+service period combination (for debugging)
+        if composite_key in market_invoice_map:
+            market_invoice_map[composite_key].append(current_invoice_no)
         else:
-            market_invoice_map[normalized_desc] = [current_invoice_no]
+            market_invoice_map[composite_key] = [current_invoice_no]
             
         # Format the amount with dollar sign and two decimal places
         formatted_amount = f"${float(amt):.2f}"
@@ -337,21 +356,35 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
         # Get service_period and description if available in enhanced_invoices
         service_period = ""
         description = ""
-        for item in invoices:
-            if len(item) >= 3:
-                orig_desc, amt, *extra_fields = item
-                if orig_desc == normalized_desc:
-                    # If the original tuple has service period and description
-                    if len(extra_fields) >= 2:
-                        service_period = extra_fields[0] if extra_fields[0] is not None else ""
-                        description = extra_fields[1] if extra_fields[1] is not None else ""
-                        break
-                    # If we're using the matrix media dataframe structure
-                    elif isinstance(item, tuple) and hasattr(item, '_asdict'):
-                        item_dict = item._asdict()
-                        service_period = item_dict.get('ServicePeriod', '')
-                        description = item_dict.get('Description', '')
-                        break
+        found_exact_match = False
+        
+        # First look for an exact match of market AND service period if available
+        if len(invoice_item) >= 3:  # If this sorted item has service period info
+            normalized_desc, amt, item_service_period, *rest = invoice_item + ("",)
+            item_description = rest[0] if rest else ""
+            
+            # Use the service period and description from the sorted item
+            service_period = item_service_period if item_service_period else ""
+            description = item_description if item_description else ""
+            found_exact_match = True
+        
+        # If we don't have service period info in the sorted item, try to find it in original invoices
+        if not found_exact_match:
+            for item in invoices:
+                if len(item) >= 3:
+                    orig_desc, amt, *extra_fields = item
+                    if orig_desc == normalized_desc:
+                        # If the original tuple has service period and description
+                        if len(extra_fields) >= 2:
+                            service_period = extra_fields[0] if extra_fields[0] is not None else ""
+                            description = extra_fields[1] if extra_fields[1] is not None else ""
+                            break
+                        # If we're using the matrix media dataframe structure
+                        elif isinstance(item, tuple) and hasattr(item, '_asdict'):
+                            item_dict = item._asdict()
+                            service_period = item_dict.get('ServicePeriod', '')
+                            description = item_dict.get('Description', '')
+                            break
                     
         # Insert into the database
         cursor.execute(
