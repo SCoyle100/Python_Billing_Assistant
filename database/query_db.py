@@ -36,22 +36,54 @@ def print_invoices(rows):
         print("No invoices found.")
         return
 
-    # Print header
-    print(f"{'ID':<5} {'Batch_ID':<20} {'Invoice_No':<15} {'Description':<30} {'Amount':<10} {'Date':<15} {'Market':<15} {'DOCX_File_Path':<40}")
-    print("-" * 125)
+    # Print header with all possible columns
+    print(f"{'ID':<5} {'Batch_ID':<15} {'Invoice_No':<12} {'Vendor':<12} {'Amount':<10} {'Date':<12} {'Market':<15} {'Service Period':<15} {'Description':<20} {'DOCX_File_Path':<30}")
+    print("-" * 135)
+
     for row in rows:
-        id, batch_id, invoice_no, description, amount, date, market, docx_file_path = row
+        # Handle different numbers of columns in the result set
+        if len(row) == 8:  # Old schema
+            id, batch_id, invoice_no, vendor, amount, date, market, docx_file_path = row
+            service_period = ""
+            description = ""
+        elif len(row) == 9:  # Missing either service_period or description
+            id, batch_id, invoice_no, vendor, amount, date, market, field8, docx_file_path = row
+            # Determine if field8 is service_period or description (this is a guess)
+            if field8 and any(word in field8.lower() for word in ['period', 'date', 'time', 'month', 'year', 'quarter']):
+                service_period = field8
+                description = ""
+            else:
+                service_period = ""
+                description = field8
+        elif len(row) == 10:  # Full new schema
+            id, batch_id, invoice_no, vendor, amount, date, market, service_period, description, docx_file_path = row
+        elif len(row) > 10:  # Extra columns
+            id, batch_id, invoice_no, vendor, amount, date, market, service_period, description, docx_file_path = row[:10]
+        else:  # Fewer columns than expected
+            fields = list(row) + [""] * (10 - len(row))
+            id, batch_id, invoice_no, vendor, amount, date, market, service_period, description, docx_file_path = fields
+            
         # Convert None values to empty strings for all fields
         id = str(id) if id is not None else ""
         batch_id = str(batch_id) if batch_id is not None else ""
         invoice_no = str(invoice_no) if invoice_no is not None else ""
-        description = str(description) if description is not None else ""
+        vendor = str(vendor) if vendor is not None else ""
         amount = str(amount) if amount is not None else ""
         date = str(date) if date is not None else ""
         market = str(market) if market is not None else ""
+        service_period = str(service_period) if service_period is not None else ""
+        description = str(description) if description is not None else ""
         docx_file_path = str(docx_file_path) if docx_file_path is not None else ""
         
-        print(f"{id:<5} {batch_id:<20} {invoice_no:<15} {description:<30} {amount:<10} {date:<15} {market:<15} {docx_file_path:<40}")
+        # Truncate long values for better display
+        if len(market) > 15:
+            market = market[:12] + "..."
+        if len(description) > 20:
+            description = description[:17] + "..."
+        if len(docx_file_path) > 30:
+            docx_file_path = docx_file_path[:27] + "..."
+        
+        print(f"{id:<5} {batch_id:<15} {invoice_no:<12} {vendor:<12} {amount:<10} {date:<12} {market:<15} {service_period:<15} {description:<20} {docx_file_path:<30}")
 
         
 def main():
