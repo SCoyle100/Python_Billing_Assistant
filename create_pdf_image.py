@@ -4,9 +4,11 @@ import fitz  # PyMuPDF
 import logging
 from PIL import Image
 import win32com.client as win32
+from utils.decorators import performance_logger
 
 logging.basicConfig(level=logging.DEBUG)
 
+@performance_logger(output_dir='logs')
 def create_pdf_from_docx(docx_path):
     try:
         normalized_path = os.path.normpath(docx_path)
@@ -65,6 +67,7 @@ def normalize_market_name(market):
     return market
 
 
+@performance_logger(output_dir='logs')
 def convert_pdf_to_images(pdf_path, dpi=600, vendor_name=None, invoice_data=None, page_market_mapping=None):
     try:
         logging.info(f"Converting PDF to images: {pdf_path}")
@@ -128,11 +131,16 @@ def convert_pdf_to_images(pdf_path, dpi=600, vendor_name=None, invoice_data=None
         # Normalize invoice data market names and create a lookup dictionary
         market_to_invoice = {}
         if invoice_data:
+            logging.info(f"DEBUG: Processing invoice data for image creation:")
             for market, amount, inv_no in invoice_data:
                 # Remove control characters and normalize
                 clean_market = normalize_market_name(market.replace('\x07', ''))
                 market_to_invoice[clean_market] = inv_no
-                logging.debug(f"Market mapping: '{clean_market}' -> '{inv_no}'")
+                logging.info(f"Market mapping: '{clean_market}' -> '{inv_no}'")
+            
+            logging.info("DEBUG: Complete market to invoice mapping:")
+            for market, invoice in market_to_invoice.items():
+                logging.info(f"  {market} -> {invoice}")
 
         for current_page in range(len(pdf_document)):
             # Get market for current page
@@ -159,6 +167,24 @@ def convert_pdf_to_images(pdf_path, dpi=600, vendor_name=None, invoice_data=None
                     components.append(safe_vendor)
                 components.append(f"page_{current_page + 1}")
 
+                # Special handling for Fort Payne
+                is_fort_payne = 'fort payne' in norm_market.lower() or 'ft payne' in norm_market.lower() or 'ft. payne' in norm_market.lower()
+                if is_fort_payne:
+                    logging.info(f"Special handling for Fort Payne market on page {current_page + 1}")
+                    # Always normalize Fort Payne in the filename to ensure consistency
+                    components[1] = "fortpayne"
+                    
+                    # Ensure we're using the correct invoice number for Fort Payne
+                    fort_payne_inv = None
+                    for mkt, _, inv in invoice_data:
+                        if 'fort payne' in mkt.lower() or 'ft payne' in mkt.lower() or 'ft. payne' in mkt.lower():
+                            fort_payne_inv = inv
+                            break
+                    
+                    if fort_payne_inv:
+                        components[0] = str(fort_payne_inv)
+                        logging.info(f"Using Fort Payne invoice {fort_payne_inv} for this image")
+                    
                 output_image_path = os.path.join(pdf_dir, "_".join(components) + ".png")
                 logging.info(f"Creating image: {output_image_path}")
                 
@@ -184,6 +210,7 @@ def convert_pdf_to_images(pdf_path, dpi=600, vendor_name=None, invoice_data=None
         return []
 
 
+@performance_logger(output_dir='logs')
 def create_images_from_docx(docx_path, vendor_name, invoice_data=None, page_market_mapping=None):
     logging.info(f"Creating images from DOCX: {docx_path}")
     logging.info(f"Vendor: {vendor_name}, Invoice data: {invoice_data}")

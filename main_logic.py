@@ -58,7 +58,13 @@ converter = PDFConverter()
 
 
 load_dotenv()
-logging.basicConfig(level=logging.DEBUG)
+
+# Import performance decorators and logging config
+from utils.decorators import performance_logger, cache_result, retry
+from utils.logging_config import configure_logging
+
+# Configure logging with timestamped files
+configure_logging(logs_dir='logs', console_level=logging.INFO, file_level=logging.DEBUG)
 
 # Initialize Qt Application for dialogs
 app = QApplication(sys.argv)
@@ -90,6 +96,7 @@ invoice_extractor = dspy.Predict(ExtractInvoiceInfo)
 
 
 
+@performance_logger(output_dir='logs/performance')
 def extract_structured_data_from_email(email_body):
     """
     Use DSPy to extract invoice information from the email body (description, amount).
@@ -187,6 +194,7 @@ def process_selected_eml_file(eml_file_path):
 
 
 
+@performance_logger(output_dir='logs/performance')
 def process_all_pdfs_in_directory():
     """
     Loops through each PDF in 'downloaded files email' and calls handle_vendor_identification
@@ -204,6 +212,7 @@ def process_all_pdfs_in_directory():
         handle_vendor_identification(pdf_file_path)
 
 
+@performance_logger(output_dir='logs/performance')
 def handle_vendor_identification(pdf_file_path):
     """
     Identifies the vendor for a single PDF file, then executes the appropriate logic.
@@ -227,59 +236,40 @@ def handle_vendor_identification(pdf_file_path):
     match vendor_name:
         case "Matrix Media":
             print(f"Executing script for {base_name}, vendor is Matrix Media...")
-            analyze_word_document(docx_file_path) #matrix media logic
-            df_invoices = build_dataframe_from_word_document(docx_file_path)
-
-
-
-            '''
-            invoices_list = list(
-            df_invoices[['Market', 'Amount']].itertuples(index=False, name=None)
-             ) #matrix media dataframe
+            # Apply the matrix media logic to update dollar amounts in the Word document
+            analyze_word_document(docx_file_path)
             
-            save_invoices_to_db(
-                invoices = invoices_list,
-                batch_id = BATCH_ID,
-                source = "Matrix Media"
-                #docx_file_path = docx_file_path
-            )
-
-            images = create_images_from_docx(docx_file_path, vendor_name)
-            if images:
-                DOCX_IMAGES_MAP[docx_file_path] = images
-                logging.info(f"Created {len(images)} images for {docx_file_path}.")
-            else:
-                logging.info(f"No images created for {docx_file_path}.")
-
-            logging.debug(f"DOCX_IMAGES_MAP: {DOCX_IMAGES_MAP}")
-
-            '''
-
+            # Extract invoice data into a DataFrame
+            df_invoices = build_dataframe_from_word_document(docx_file_path)
+            
+            # Debug print to verify DataFrame correctly identifies all markets
+            print("DEBUG: DataFrame contents before converting to invoice list:")
+            print(df_invoices)
+            
+            # Convert DataFrame rows to a list of (Market, Amount) tuples
             invoices_list = list(df_invoices[['Market', 'Amount']].itertuples(index=False, name=None))
             
+            print("DEBUG: Invoice list before saving to DB:")
+            for market, amount in invoices_list:
+                print(f"Market: '{market}', Amount: {amount}")
+            
+            # Save to database and get enhanced invoice data with invoice numbers
             enhanced_invoices = save_invoices_to_db(
-            invoices=invoices_list,
-            batch_id=BATCH_ID,
-            source="Matrix Media",
-            #docx_file_path=docx_file_path
+                invoices=invoices_list,
+                batch_id=BATCH_ID,
+                source="Matrix Media",
+                docx_file_path=docx_file_path  # Include the docx file path
             )
 
-            print("DEBUG: Enhanced invoices structure:")
-            print(enhanced_invoices)
+            print("DEBUG: Enhanced invoices after DB save:")
+            for market, amount, inv_no in enhanced_invoices:
+                print(f"Market: '{market}', Amount: {amount}, Invoice: {inv_no}")
+            
             print("DEBUG: Page to market mapping:")
-            print(page_to_market)
-
-        # Also log the market names for comparison
-            print("DEBUG: Markets in invoice data:")
-            if enhanced_invoices:
-                for market, amount, inv_no in enhanced_invoices:
-                    print(f"Market: '{market}', Invoice: {inv_no}")
-
-            print("DEBUG: Markets in page mapping:")
             for page, market in page_to_market.items():
                 print(f"Page {page}: '{market}'")
 
-
+            # Create images from the Word document
             images = create_images_from_docx(
                 docx_file_path, 
                 "Matrix Media", 
@@ -348,6 +338,7 @@ import glob
 
 
 
+@performance_logger(output_dir='logs/performance')
 def create_word_document():
     # Database fetch and filtering
     db_dir = os.path.join(os.getcwd(), 'database')
@@ -374,17 +365,15 @@ def create_word_document():
         logging.warning("No invoice data found in database")
         return
 
-    # Calculate the 2-minute cutoff
-    cutoff_time = datetime.datetime.now() - datetime.timedelta(minutes=200)  # Increased to 200 minutes for testing
-    
-    # First, group by batch_id to maintain the exact order of processing
+    # Group by batch_id to maintain the exact order of processing
+    # No time filtering - just group all rows by batch_id
     batch_invoices = defaultdict(list)
     for row in all_rows:
         invoice_no, market, amount, batch_id, source, docx_file_path = row
         try:
-            dt = datetime.datetime.strptime(batch_id, "%Y%m%d_%H%M%S")
-            if dt >= cutoff_time:
-                batch_invoices[batch_id].append(row)
+            # Just validate the batch_id format, don't filter by time
+            datetime.datetime.strptime(batch_id, "%Y%m%d_%H%M%S")
+            batch_invoices[batch_id].append(row)
         except ValueError:
             logging.warning(f"Invalid batch_id format: {batch_id}")
             continue
@@ -435,7 +424,23 @@ def create_word_document():
         page_content = invoice.invoice_string  # from your "invoice" module
         page_content = page_content.replace('<<invoice>>', str(invoice_no))
         page_content = page_content.replace('<<description>>', str(market))
-        page_content = page_content.replace('<<billing>>', str(amount))
+        
+        # Format the amount with dollar sign and two decimal places
+        if isinstance(amount, str) and amount.startswith('$'):
+            # If amount is already formatted with $, use it as is
+            formatted_amount = amount
+        else:
+            # Otherwise, format it properly
+            try:
+                # Try to convert to float first (handles both string and numeric inputs)
+                amount_float = float(amount)
+                formatted_amount = f"${amount_float:.2f}"
+            except (ValueError, TypeError):
+                # If conversion fails, use as is
+                formatted_amount = str(amount)
+        
+        page_content = page_content.replace('<<billing>>', formatted_amount)
+        
         lines = page_content.split('\n')[5:]
         for line in lines:
             sanitized_line = remove_control_characters(line)
@@ -450,8 +455,8 @@ def create_word_document():
                 run = para.runs[0]
                 run.font.size = Pt(9)
                 run.font.name = 'Courier'
-            para.paragraph_format.line_spacing = 1
-        # Only add page break if requested
+                para.paragraph_format.line_spacing = 1
+
         if add_pagebreak:
             doc.add_page_break()
 
@@ -473,6 +478,12 @@ def create_word_document():
         
         matching_images = []
         
+        # Check if this is a Fort Payne invoice
+        is_fort_payne = False
+        if market and any(fp in market.lower() for fp in ["fort payne", "ft. payne", "ft payne"]):
+            is_fort_payne = True
+            logging.info(f"This is a Fort Payne invoice: {invoice_no}")
+        
         # Try several different patterns, from most specific to most general
         patterns = []
         
@@ -481,6 +492,14 @@ def create_word_document():
         safe_market = "".join(c for c in str(market) if c.isalnum() or c in ('-', '_')).lower()
         safe_vendor = "".join(c for c in str(vendor_name) if c.isalnum() or c in ('-', '_')).lower()
         
+        # Special patterns for Fort Payne
+        if is_fort_payne and vendor_name == "Matrix Media":
+            # For Fort Payne, we need to check for various spellings/formats
+            patterns.append((f"{safe_invoice_no}_fortpayne_{safe_vendor}_page_*.png", "Fort Payne exact"))
+            patterns.append((f"{safe_invoice_no}_fort*payne*_page_*.png", "Fort Payne wildcard"))
+            patterns.append((f"{safe_invoice_no}_ft*payne*_page_*.png", "Ft Payne wildcard"))
+        
+        # Standard patterns
         # Pattern 1: Exact match with invoice, market, vendor
         patterns.append((f"{safe_invoice_no}_{safe_market}_{safe_vendor}_page_*.png", "exact match"))
         
@@ -563,6 +582,12 @@ def create_word_document():
             
             # Handle images based on vendor type
             if vendor_name == "Matrix Media":
+                # Special handling for Fort Payne in Matrix Media
+                is_fort_payne = "Fort Payne" in market or "Ft. Payne" in market or "Ft Payne" in market
+                
+                if is_fort_payne:
+                    logging.info(f"Special handling for Fort Payne invoice {invoice_no}")
+                
                 if matching_images:
                     logging.info(f"Adding {len(matching_images)} images for {vendor_name} invoice {invoice_no}")
                     for img_path in matching_images:
@@ -576,6 +601,37 @@ def create_word_document():
                     new_doc.add_page_break()
                 else:
                     logging.warning(f"No images found for Matrix Media invoice {invoice_no}")
+                    
+                    # Special handling for Fort Payne - search for any Fort Payne images
+                    if is_fort_payne:
+                        logging.info(f"Fort Payne invoice - searching for any Fort Payne images")
+                        # Build a more general pattern for Fort Payne
+                        fort_payne_pattern = f"*{invoice_no}*fort*payne*.png"
+                        fort_payne_images = []
+                        
+                        # Search in all image directories
+                        for image_dir in [
+                            os.path.join(os.getcwd(), "downloaded files email"),
+                            os.path.join(os.getcwd(), "pdf images"),
+                            os.path.join(os.getcwd(), "images"),
+                            os.path.join(os.getcwd(), "output"),
+                            os.getcwd()
+                        ]:
+                            if os.path.exists(image_dir):
+                                for f in os.listdir(image_dir):
+                                    if f.lower().endswith('.png') and fnmatch.fnmatch(f.lower(), fort_payne_pattern.lower()):
+                                        fort_payne_images.append(os.path.join(image_dir, f))
+                        
+                        if fort_payne_images:
+                            logging.info(f"Found {len(fort_payne_images)} Fort Payne images for invoice {invoice_no}")
+                            for img_path in fort_payne_images:
+                                try:
+                                    logging.info(f"Adding Fort Payne image: {img_path}")
+                                    new_doc.add_page_break()
+                                    new_doc.add_picture(img_path, width=Inches(6))
+                                except Exception as e:
+                                    logging.error(f"Error adding Fort Payne image {img_path}: {str(e)}")
+                            new_doc.add_page_break()
             
             elif vendor_name == "Capitol Media":
                 # For Capitol Media, collect all images to add after all invoices

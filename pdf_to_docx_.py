@@ -24,13 +24,37 @@ from openai import OpenAI
 from PyQt5.QtWidgets import QFileDialog, QApplication, QMessageBox
 import win32com.client as win32
 
-logging.basicConfig(level=logging.INFO)
+# Import utils
+try:
+    # Check if our utils module is available
+    from utils.decorators import retry, performance_logger
+    from utils.logging_config import configure_logging
+    
+    # Configure logging with timestamps
+    configure_logging(logs_dir='logs', console_level=logging.INFO, file_level=logging.DEBUG)
+except ImportError:
+    # Fallback to basic logging if utils not available
+    logging.basicConfig(level=logging.INFO)
+    
+    # Create dummy decorators to avoid errors
+    def retry(*args, **kwargs):
+        def decorator(func):
+            return func
+        return decorator if callable(args[0]) else decorator
+        
+    def performance_logger(*args, **kwargs):
+        def decorator(func):
+            return func
+        return decorator if callable(args[0]) else decorator
 
 class PDFConverter:
     def __init__(self):
         self.word = None
         self.doc = None
 
+    @performance_logger(output_dir='logs/performance')
+    @retry(max_attempts=3, delay=2, backoff=2, 
+          exceptions=(ServiceApiException, ServiceUsageException, SdkException))
     def convert_pdf_to_docx(self, input_path):
         try:
             with open(input_path, 'rb') as file:
