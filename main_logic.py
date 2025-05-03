@@ -43,6 +43,8 @@ from vendor_invoice_logic.capitol_media_dataframe_1 import build_dataframe_from_
 
 from image_generation.create_pdf_image import create_images_from_docx
 
+from utils.pdf_utils import combine_vendor_pdfs
+
 
 #from vendor_invoice_logic.capitol_media_logic import split_large_amounts_and_format
 
@@ -198,29 +200,68 @@ def process_selected_eml_file(eml_file_path):
 def process_all_pdfs_in_directory():
     """
     Loops through each PDF in 'downloaded files email' and calls handle_vendor_identification
-    on a per-file basis.
+    on a per-file basis. If multiple Matrix Media PDFs are found, they are combined into a single PDF
+    before processing.
     """
     directory = "downloaded files email"
-    # If you'd like to ensure we only process PDF files, you can filter here:
+    
+    # Identify vendors for all PDFs in the directory
+    vendor_map = identify_vendors_from_pdfs_in_directory(directory)
+    
+    # If there are multiple Matrix Media PDFs, combine them into a single PDF
+    matrix_media_files = [fname for fname, vendor in vendor_map.items() 
+                         if vendor == "Matrix Media" and fname.lower().endswith(".pdf")]
+    
+    if len(matrix_media_files) > 1:
+        logging.info(f"Found {len(matrix_media_files)} Matrix Media PDFs. Combining them into a single file.")
+        
+        # Sort the files alphabetically for consistent ordering
+        matrix_media_files.sort()
+        
+        # Combine the Matrix Media PDFs
+        combined_pdf_path = combine_vendor_pdfs(directory, "Matrix Media", vendor_map, "Combined_Matrix_Media.pdf")
+        
+        # Update the vendor map to include the new combined file
+        if combined_pdf_path:
+            new_filename = os.path.basename(combined_pdf_path)
+            vendor_map[new_filename] = "Matrix Media"
+            
+            # Remove original files from vendor map as they've been combined
+            for file in matrix_media_files:
+                if file in vendor_map:
+                    vendor_map.pop(file)
+    
+    # Get all PDF files in the directory
     all_pdf_files = [
         os.path.join(directory, f) for f in os.listdir(directory) 
         if os.path.isfile(os.path.join(directory, f)) and f.lower().endswith(".pdf")
     ]
 
     for pdf_file_path in all_pdf_files:
+        # Skip original Matrix Media files if we created a combined file
+        filename = os.path.basename(pdf_file_path)
+        if len(matrix_media_files) > 1 and filename in matrix_media_files:
+            logging.info(f"Skipping {filename} as it has been combined into a single PDF.")
+            continue
+            
         print(f"Processing file: {pdf_file_path}")
-        handle_vendor_identification(pdf_file_path)
+        handle_vendor_identification(pdf_file_path, vendor_map)
 
 
 @performance_logger(output_dir='logs/performance')
-def handle_vendor_identification(pdf_file_path):
+def handle_vendor_identification(pdf_file_path, vendor_map=None):
     """
     Identifies the vendor for a single PDF file, then executes the appropriate logic.
+    
+    Args:
+        pdf_file_path (str): Path to the PDF file to process.
+        vendor_map (dict, optional): Mapping of filenames to vendor names. If None, 
+                                    the function will generate it.
     """
-    # This assumes 'identify_vendors_from_pdfs_in_directory' can handle or return
-    # a result for a single given PDF, or you could add a small helper that looks up
-    # the single PDF in the dict it returns for the entire directory.
-    vendor_map = identify_vendors_from_pdfs_in_directory(os.path.dirname(pdf_file_path))
+    # If vendor_map is not provided, generate it for the current directory
+    if vendor_map is None:
+        vendor_map = identify_vendors_from_pdfs_in_directory(os.path.dirname(pdf_file_path))
+    
     base_name = os.path.basename(pdf_file_path)
     vendor_name = vendor_map.get(base_name, "Unknown")
 
@@ -592,13 +633,10 @@ def create_word_document():
         # Build each invoice page
         for (invoice_no, market, amount, batch_id, docx_file_path) in invoice_list:
             logging.info(f"Adding invoice: {invoice_no}, market: {market}, amount: {amount}")
-            # Check if we have images before adding page break
+            # Find matching images for this invoice (do this only once)
             matching_images = find_invoice_images(invoice_no, market, vendor_name)
             has_images = len(matching_images) > 0
             add_invoice_page(new_doc, invoice_no, market, amount, not has_images)
-            
-            # Find matching images for this invoice
-            matching_images = find_invoice_images(invoice_no, market, vendor_name)
             
             # Handle images based on vendor type
             if vendor_name == "Matrix Media":

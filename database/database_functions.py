@@ -271,7 +271,12 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
         # Secondary key: Service period (third element if it exists)
         service_period = ""
         if len(x) >= 3:
-            service_period = x[2].lower() if x[2] else ""
+            # Check if third element is a string before calling lower()
+            if isinstance(x[2], str):
+                service_period = x[2].lower() if x[2] else ""
+            else:
+                # If it's not a string (e.g., it's a float or another numeric type), convert to string
+                service_period = str(x[2]) if x[2] is not None else ""
             
         return (market, service_period)
     
