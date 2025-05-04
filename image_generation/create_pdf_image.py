@@ -13,11 +13,19 @@ def create_pdf_from_docx(docx_path):
     try:
         normalized_path = os.path.normpath(docx_path)
         pdf_path = os.path.splitext(normalized_path)[0] + ".pdf"
+        
+        # Check if the PDF already exists, if so just return it
+        if os.path.exists(pdf_path):
+            logging.info(f"PDF already exists, reusing: {pdf_path}")
+            return pdf_path
+        
+        # Create the PDF from DOCX
         word_app = win32.Dispatch("Word.Application")
         doc = word_app.Documents.Open(normalized_path)
         doc.SaveAs(pdf_path, FileFormat=17)
         doc.Close()
         word_app.Quit()
+        
         if os.path.exists(pdf_path):
             logging.debug(f"PDF created: {pdf_path}")
             return pdf_path
@@ -51,6 +59,38 @@ def resize_image(image_path, max_width=2550, max_height=3300):
     except Exception as e:
         logging.error(f"Error resizing image {image_path}: {e}")
 
+def clean(s: str) -> str:
+    """Clean text by removing control characters (including BEL \x07) and extra whitespace"""
+    if not s:
+        return ''
+    # Remove BEL character and other control characters
+    s = s.replace('\x07', '').strip().lower()
+    return s
+
+def normalize_service_period(svc):
+    """Normalize service periods for consistent comparison"""
+    if not svc:
+        return ""
+    
+    # Clean and lowercase the service period
+    svc = clean(svc).lower()
+    
+    # Standardize common month formats
+    month_mappings = {
+        "january": "jan", "february": "feb", "march": "mar", 
+        "april": "apr", "may": "may", "june": "jun",
+        "july": "jul", "august": "aug", "september": "sep", 
+        "october": "oct", "november": "nov", "december": "dec"
+    }
+    
+    for full_month, abbr in month_mappings.items():
+        svc = svc.replace(full_month, abbr)
+    
+    # Remove extra spaces
+    svc = " ".join(svc.split())
+    
+    return svc
+
 def normalize_market_name(market):
     """Normalize market names for consistent comparison"""
     if not market:
@@ -66,6 +106,15 @@ def normalize_market_name(market):
         market = 'fort payne'
     return market
 
+def create_market_service_key(market, service_period=""):
+    """Create a unique key combining market and service period"""
+    normalized_market = normalize_market_name(market)
+    # Use normalize_service_period to standardize service period format
+    normalized_service_period = normalize_service_period(service_period)
+    if normalized_service_period:
+        return (normalized_market, normalized_service_period)
+    return (normalized_market, "")
+
 
 @performance_logger(output_dir='logs')
 def convert_pdf_to_images(pdf_path, dpi=600, vendor_name=None, invoice_data=None, page_market_mapping=None):
@@ -78,7 +127,16 @@ def convert_pdf_to_images(pdf_path, dpi=600, vendor_name=None, invoice_data=None
             logging.info("No invoice data provided")
         logging.info(f"Page to market mapping: {page_market_mapping}")
         
+        # Emergency fix: generate an image even if we're missing data
+        if not os.path.exists(pdf_path):
+            logging.error(f"PDF file does not exist: {pdf_path}")
+            return []
+        
         pdf_document = fitz.open(pdf_path)
+        if not pdf_document or pdf_document.page_count == 0:
+            logging.error(f"PDF document could not be opened or has no pages: {pdf_path}")
+            return []
+            
         image_paths = []
         pdf_dir = os.path.dirname(pdf_path)
         
@@ -128,70 +186,152 @@ def convert_pdf_to_images(pdf_path, dpi=600, vendor_name=None, invoice_data=None
         # For other vendors like Matrix Media, process with market/invoice mapping
         logging.info("Processing non-Capitol Media document with market mapping")
         
-        # Normalize invoice data market names and create a lookup dictionary
-        market_to_invoice = {}
+        # Build the market_service_to_invno mapping: key=(clean_market, clean_service_period), value=invoice_no
+        market_service_to_invno = {}
+        
         if invoice_data:
-            logging.info(f"DEBUG: Processing invoice data for image creation:")
-            for market, amount, inv_no in invoice_data:
-                # Remove control characters and normalize
-                clean_market = normalize_market_name(market.replace('\x07', ''))
-                market_to_invoice[clean_market] = inv_no
-                logging.info(f"Market mapping: '{clean_market}' -> '{inv_no}'")
+            logging.info(f"Building market+service_period to invoice mapping from invoice data:")
             
-            logging.info("DEBUG: Complete market to invoice mapping:")
-            for market, invoice in market_to_invoice.items():
-                logging.info(f"  {market} -> {invoice}")
-
-        for current_page in range(len(pdf_document)):
-            # Get market for current page
-            market = page_market_mapping.get(current_page + 1) if page_market_mapping else None
-            
-            if market:
-                logging.info(f"Found market: {market} for page {current_page + 1}")
-                norm_market = normalize_market_name(market)
-                logging.info(f"Normalized market: {norm_market}")
-                invoice_no = market_to_invoice.get(norm_market)
-                logging.info(f"Invoice number: {invoice_no}")
-                
-                if not invoice_no:
-                    logging.warning(f"No invoice number found for market: {market} (normalized: {norm_market}) on page {current_page + 1}")
+            for item in invoice_data:
+                if len(item) == 3:
+                    market, amount, inv_no = item
+                    service_period, description = "", ""
+                elif len(item) == 4:
+                    market, amount, inv_no, service_period = item
+                    description = ""
+                elif len(item) == 5:
+                    market, amount, inv_no, service_period, description = item
+                else:
+                    logging.warning(f"Unexpected invoice format (skipping): {item!r}")
                     continue
 
-                # Create filename components
-                components = []
-                components.append(str(invoice_no))
-                safe_market = "".join(c for c in norm_market if c.isalnum() or c in ('-', '_')).lower()
-                components.append(safe_market)
-                if vendor_name:
-                    safe_vendor = "".join(c for c in vendor_name if c.isalnum() or c in ('-', '_'))
-                    components.append(safe_vendor)
-                components.append(f"page_{current_page + 1}")
+                # Ensure all values are strings before applying string operations
+                market = str(market) if market is not None else ""
+                service_period = str(service_period) if service_period is not None else ""
+                inv_no = str(inv_no) if inv_no is not None else ""
 
-                # Special handling for Fort Payne
-                is_fort_payne = 'fort payne' in norm_market.lower() or 'ft payne' in norm_market.lower() or 'ft. payne' in norm_market.lower()
-                if is_fort_payne:
-                    logging.info(f"Special handling for Fort Payne market on page {current_page + 1}")
-                    # Always normalize Fort Payne in the filename to ensure consistency
-                    components[1] = "fortpayne"
-                    
-                    # Ensure we're using the correct invoice number for Fort Payne
-                    fort_payne_inv = None
-                    for mkt, _, inv in invoice_data:
-                        if 'fort payne' in mkt.lower() or 'ft payne' in mkt.lower() or 'ft. payne' in mkt.lower():
-                            fort_payne_inv = inv
-                            break
-                    
-                    if fort_payne_inv:
-                        components[0] = str(fort_payne_inv)
-                        logging.info(f"Using Fort Payne invoice {fort_payne_inv} for this image")
-                    
-                output_image_path = os.path.join(pdf_dir, "_".join(components) + ".png")
-                logging.info(f"Creating image: {output_image_path}")
+                clean_market = normalize_market_name(market)
+                clean_svc = normalize_service_period(service_period)
+                key = (clean_market, clean_svc)
+                market_service_to_invno[key] = inv_no
                 
+                # Debug output for each key we add to the mapping
+                logging.info(f"Mapping: ({clean_market!r}, {clean_svc!r}) -> {inv_no!r}")
+            
+            # List all the keys we have for debugging
+            logging.info("Available market+service_period keys:")
+            for (mkt, svc), inv in market_service_to_invno.items():
+                logging.info(f"  '{mkt}' + '{svc}' -> {inv}")
+        
+        # Process each page to generate an image with the correct invoice number
+        for current_page in range(len(pdf_document)):
+            page_num = current_page + 1
+            page_data = page_market_mapping.get(page_num) if page_market_mapping else None
+            
+            # 1. Get market & service period either from page mapping or fallback to first invoice
+            market_on_page = None
+            svc_on_page = ""
+            
+            if page_data:
+                # We have mapping data for this page
+                if isinstance(page_data, tuple) and len(page_data) == 2:
+                    market_on_page, svc_on_page = page_data
+                else:
+                    market_on_page = page_data
+                
+                logging.info(f"Found market: {market_on_page} for page {page_num}")
+            elif invoice_data and len(invoice_data) > 0:
+                # No mapping, use first invoice's market as fallback
+                market_on_page = invoice_data[0][0]
+                if len(invoice_data[0]) > 3:
+                    svc_on_page = invoice_data[0][3]
+                logging.info(f"Using first invoice's market as fallback for page {page_num}: {market_on_page}")
+            else:
+                # No mapping and no invoice data - skip this page
+                logging.warning(f"No market data for page {page_num} and no invoice data available")
+                continue
+            
+            # Ensure values are strings before applying string operations
+            market_on_page = str(market_on_page) if market_on_page is not None else ""
+            svc_on_page = str(svc_on_page) if svc_on_page is not None else ""
+            
+            # 2. Clean and normalize the market and service period
+            clean_market = normalize_market_name(market_on_page)
+            clean_svc = normalize_service_period(svc_on_page)
+            logging.info(f"Page {page_num}: market='{clean_market}', service_period='{clean_svc}'")
+            
+            # 3. DETERMINE THE CORRECT INVOICE NUMBER
+            invoice_no = None
+            
+            # Special handling for Fort Payne
+            is_fort_payne = any(fp in clean_market for fp in ["fort payne", "ft payne", "ft. payne"])
+            
+            if is_fort_payne and vendor_name == "Matrix Media":
+                # For Fort Payne in Matrix Media, find the Fort Payne invoice and use it consistently
+                for item in invoice_data:
+                    # Convert market name to string before normalizing
+                    market_item = str(item[0]) if item[0] is not None else ""
+                    if len(item) >= 3 and any(fp in normalize_market_name(market_item) for fp in ["fort payne", "ft payne", "ft. payne"]):
+                        invoice_no = str(item[2]) if item[2] is not None else ""
+                        logging.info(f"Using Fort Payne invoice: {invoice_no}")
+                        break
+            
+            # Handle all other markets
+            if not invoice_no and market_service_to_invno:
+                # Try exact match with market and service period
+                lookup_key = (clean_market, clean_svc)
+                invoice_no = market_service_to_invno.get(lookup_key)
+                
+                if invoice_no:
+                    logging.info(f"Found exact match for ({clean_market}, {clean_svc}) -> {invoice_no}")
+                else:
+                    # Try market name only (for any service period)
+                    matches = [(k, v) for k, v in market_service_to_invno.items() if k[0] == clean_market]
+                    
+                    if matches:
+                        # Use the first match for this market
+                        invoice_no = matches[0][1]
+                        if len(matches) > 1:
+                            logging.warning(f"Multiple entries for '{clean_market}' but using {invoice_no}")
+                        else:
+                            logging.info(f"Using only available invoice for '{clean_market}': {invoice_no}")
+            
+            # Last resort fallback - use first invoice number
+            if not invoice_no and invoice_data and len(invoice_data) > 0:
+                invoice_no = invoice_data[0][2]
+                logging.warning(f"Using first invoice as fallback: {invoice_no}")
+            
+            # If we still don't have an invoice number, skip this page
+            if not invoice_no:
+                logging.error(f"No invoice number found for page {page_num}, skipping")
+                continue
+            
+            # 4. Create the image filename
+            components = []
+            components.append(str(invoice_no))
+            safe_market = "".join(c for c in clean_market if c.isalnum() or c in ('-', '_')).lower()
+            components.append(safe_market)
+            
+            # Special handling for Fort Payne names
+            if is_fort_payne:
+                logging.info(f"Normalizing Fort Payne market name in filename for page {page_num}")
+                components[1] = "fortpayne"
+            
+            if vendor_name:
+                safe_vendor = "".join(c for c in vendor_name if c.isalnum() or c in ('-', '_')).lower()
+                components.append(safe_vendor)
+            
+            components.append(f"page_{page_num}")
+            
+            output_image_path = os.path.join(pdf_dir, "_".join(components) + ".png")
+            logging.info(f"Creating image: {output_image_path}")
+            
+            # 5. Generate and save the image
+            try:
                 # Handle existing file
                 if os.path.exists(output_image_path):
                     os.remove(output_image_path)
-
+    
                 # Convert page to image
                 page = pdf_document[current_page]
                 pix = page.get_pixmap(matrix=fitz.Matrix(dpi/72, dpi/72))
@@ -201,7 +341,9 @@ def convert_pdf_to_images(pdf_path, dpi=600, vendor_name=None, invoice_data=None
                 resize_image(output_image_path)
                 
                 image_paths.append(output_image_path)
-                logging.info(f"Saved image for page {current_page + 1} to {output_image_path}")
+                logging.info(f"Saved image for page {page_num} to {output_image_path}")
+            except Exception as e:
+                logging.error(f"Error generating image for page {page_num}: {e}")
 
         return image_paths
 
@@ -213,7 +355,30 @@ def convert_pdf_to_images(pdf_path, dpi=600, vendor_name=None, invoice_data=None
 @performance_logger(output_dir='logs')
 def create_images_from_docx(docx_path, vendor_name, invoice_data=None, page_market_mapping=None):
     logging.info(f"Creating images from DOCX: {docx_path}")
-    logging.info(f"Vendor: {vendor_name}, Invoice data: {invoice_data}")
+    logging.info(f"Vendor: {vendor_name}")
+    
+    # DEBUG: Print detailed invoice data to better understand duplicate markets
+    if invoice_data:
+        logging.info("DETAILED INVOICE DATA:")
+        for i, item in enumerate(invoice_data):
+            if len(item) == 3:  # (market, amount, inv_no)
+                market, amount, inv_no = item
+                logging.info(f"Invoice {i+1}: Market='{market}', Amount={amount}, InvoiceNo={inv_no}, No Service Period")
+            elif len(item) == 5:  # (market, amount, inv_no, service_period, description)
+                market, amount, inv_no, service_period, description = item
+                logging.info(f"Invoice {i+1}: Market='{market}', Amount={amount}, InvoiceNo={inv_no}, ServicePeriod='{service_period}', Description='{description}'")
+            else:
+                logging.info(f"Invoice {i+1}: Unexpected format: {item}")
+    
+    # DEBUG: Print page to market mapping
+    if page_market_mapping:
+        logging.info("PAGE TO MARKET MAPPING:")
+        for page_num, page_data in sorted(page_market_mapping.items()):
+            if isinstance(page_data, tuple) and len(page_data) == 2:
+                market, service_period = page_data
+                logging.info(f"Page {page_num}: Market='{market}', ServicePeriod='{service_period}'")
+            else:
+                logging.info(f"Page {page_num}: Market='{page_data}'")
     
     pdf_path = create_pdf_from_docx(docx_path)
     if not pdf_path:
@@ -229,11 +394,20 @@ def create_images_from_docx(docx_path, vendor_name, invoice_data=None, page_mark
             page_market_mapping=page_market_mapping
         )
         logging.info(f"Created {len(image_paths)} images")
+        
+        # Save images to a designated folder for analysis
+        image_archive_dir = os.path.join(os.getcwd(), 'pdf images')
+        os.makedirs(image_archive_dir, exist_ok=True)
+        
+        # Copy images to the archive directory with original filenames
+        for img_path in image_paths:
+            filename = os.path.basename(img_path)
+            if os.path.exists(img_path):
+                # Keep the original file, no need to copy
+                logging.info(f"Keeping generated image for analysis: {img_path}")
+        
         return image_paths
     finally:
+        # Keep the PDF for reference but log it
         if os.path.exists(pdf_path):
-            try:
-                os.remove(pdf_path)
-                logging.info(f"Cleaned up intermediate PDF: {pdf_path}")
-            except Exception as e:
-                logging.error(f"Failed to remove intermediate PDF {pdf_path}: {e}")
+            logging.info(f"Keeping intermediate PDF for reference: {pdf_path}")
