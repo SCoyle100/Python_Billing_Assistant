@@ -352,11 +352,18 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
         else:
             market_invoice_map[composite_key] = [current_invoice_no]
             
-        # Format the amount with dollar sign and two decimal places
-        formatted_amount = f"${float(amt):.2f}"
+        # Format the amount with dollar sign, comma separators, and two decimal places
+        formatted_amount = f"${float(amt):,.2f}"
             
-        # Add to our enhanced invoices list
-        enhanced_invoices.append((normalized_desc, amt, current_invoice_no))
+        # Add to our enhanced invoices list with service period and description
+        # This ensures each market+service_period combination gets its own unique invoice number in image filenames
+        if service_period or description:
+            enhanced_invoices.append((normalized_desc, amt, current_invoice_no, service_period, description))
+            logging.info(f"Enhanced invoice with service period: Market='{normalized_desc}', Amount='{amt}', InvoiceNo='{current_invoice_no}', ServicePeriod='{service_period}', Description='{description}'")
+        else:
+            #enhanced_invoices.append((normalized_desc, amt, current_invoice_no))
+            #logging.info(f"Enhanced invoice without service period: Market='{normalized_desc}', Amount='{amt}', InvoiceNo='{current_invoice_no}'")
+            enhanced_invoices.append((normalized_desc, amt, current_invoice_no, "", ""))
         
         # Get service_period and description if available in enhanced_invoices
         service_period = ""
@@ -365,13 +372,22 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
         
         # First look for an exact match of market AND service period if available
         if len(invoice_item) >= 3:  # If this sorted item has service period info
-            normalized_desc, amt, item_service_period, *rest = invoice_item + ("",)
-            item_description = rest[0] if rest else ""
+            item_components = list(invoice_item) + ["", ""]  # Ensure we have enough elements
+            normalized_desc, amt = item_components[0], item_components[1]
             
-            # Use the service period and description from the sorted item
-            service_period = item_service_period if item_service_period else ""
-            description = item_description if item_description else ""
+            # Check if the third element might be service_period instead of invoice_no
+            # (invoice_no is usually added by database, not present in original invoice_item)
+            if isinstance(item_components[2], str) and ("/" in item_components[2] or "-" in item_components[2]):
+                # Looks like a service period in third position
+                service_period = item_components[2]
+                description = item_components[3] if len(item_components) > 3 else ""
+            else:
+                # Normal case - try to get service period from 4th position
+                service_period = item_components[3] if len(item_components) > 3 else ""
+                description = item_components[4] if len(item_components) > 4 else ""
+            
             found_exact_match = True
+            logging.info(f"Extracted from sorted item - Market: '{normalized_desc}', ServicePeriod: '{service_period}', Description: '{description}'")
         
         # If we don't have service period info in the sorted item, try to find it in original invoices
         if not found_exact_match:
@@ -408,6 +424,13 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
         else:
             logging.info(f"{market}: No invoices")
     logging.info("=================================")
+
+    # ← INSERT DEBUG DUMP HERE:
+    '''
+    print("DEBUG: enhanced_invoices:")
+    for mk, amt, inv, svc, desc in enhanced_invoices:
+        print(f"  DB → invoice {inv!r}   market={mk!r}   service_period={svc!r}")
+    '''
     
     # Commit changes and close connection
     conn.commit()
