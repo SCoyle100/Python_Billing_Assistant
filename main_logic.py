@@ -81,27 +81,119 @@ dspy.configure(lm=dspy.LM('openai/gpt-4o'))
 # Define DSPy signature with the user-provided date format
 class ExtractInvoiceInfo(dspy.Signature):
     """
-    Extract invoice information, which will be a description and an amount. 
-
+    Extract invoice information including description, amount, and job number if available. 
+    Look for text like 'job:' or 'job #' or 'job number:' followed by an identifier (e.g., 'TTC-350').
     """
     
     text: str = dspy.InputField()
     invoices: list[dict[str, str]] = dspy.OutputField(
-        desc="List of invoices, each with keys: Description, Amount"
+        desc="List of invoices, each with keys: Description, Amount, JobNumber (if available)"
     )
 
 
-    # Initialize the DSPy prediction module for extracting invoice info
+# Initialize the DSPy prediction module for extracting invoice info
 invoice_extractor = dspy.Predict(ExtractInvoiceInfo)
 
 
 
 
 
+import re
+
+def format_job_number(job_number):
+    """Format job numbers to ensure they have a hyphen between prefix and number."""
+    if not job_number:
+        return ""
+        
+    # If already has a hyphen, return as is
+    if "-" in job_number:
+        return job_number
+        
+    # Find the transition point between letters and numbers
+    prefix = ""
+    number = ""
+    for i, char in enumerate(job_number):
+        if char.isalpha() or char.isspace():
+            prefix += char
+        else:
+            number = job_number[i:]
+            break
+            
+    # Clean up prefix and number
+    prefix = prefix.strip()
+    number = number.strip()
+    
+    # If we found both parts, join with hyphen
+    if prefix and number:
+        return f"{prefix}-{number}"
+    
+    # Otherwise return original
+    return job_number
+
+def extract_job_number_from_description(description):
+    """Extract job number from description text."""
+    if not description:
+        return "", description
+        
+    # Common job number patterns with capturing groups
+    patterns = [
+        # Format: "JOB: TTC-380" or "Job: TTC 380"
+        r"\b(?:JOB|Job|job)\s*[:;#]\s*([A-Za-z]{2,4}[-\s]*\d{2,4})\b",
+        
+        # Format: "TTC-380" or "TTC 380" standalone
+        r"\b([A-Za-z]{2,4}[-\s]*\d{2,4})\b",
+        
+        # Format: "Job #380" or simple numbers after job indicator
+        r"\b(?:JOB|Job|job)\s*[:;#]\s*(\d{2,4})\b",
+    ]
+    
+    job_number = ""
+    clean_desc = description
+    
+    # Try each pattern until we find a match
+    for pattern in patterns:
+        match = re.search(pattern, clean_desc, re.IGNORECASE)
+        if match:
+            job_number = match.group(1)
+            # Remove the entire match (not just the captured group)
+            clean_desc = re.sub(pattern, "", clean_desc, flags=re.IGNORECASE)
+            break
+    
+    # Also check for job number in parentheses
+    if not job_number:
+        # Look for patterns like "(JOB: TTC-380)" or "(Job #123)"
+        parens_match = re.search(r"\(\s*(?:JOB|Job|job)\s*[:;#]?\s*([A-Za-z]{0,4}[-\s]*\d{2,4})\s*\)", clean_desc, re.IGNORECASE)
+        if parens_match:
+            job_number = parens_match.group(1)
+            # Remove the entire parenthesized section
+            clean_desc = re.sub(r"\(\s*(?:JOB|Job|job).*?\)", "", clean_desc, flags=re.IGNORECASE)
+    
+    # Also check for standalone "TTC-123" or similar patterns again
+    if not job_number:
+        standalone_match = re.search(r"\b([A-Za-z]{2,4}[-\s]*\d{2,4})\b", clean_desc)
+        if standalone_match:
+            job_number = standalone_match.group(1)
+            # Only remove if it's clearly a job number and not part of a regular word
+            if re.match(r"^[A-Za-z]{2,4}[-\s]*\d{2,4}$", job_number):
+                clean_desc = re.sub(r"\b" + re.escape(job_number) + r"\b", "", clean_desc)
+    
+    # Clean up multiple spaces and trim
+    clean_desc = re.sub(r'\s+', ' ', clean_desc).strip()
+    
+    return job_number, clean_desc
+
+def clean_description_from_job_numbers(description):
+    """Remove any job number references from the description."""
+    if not description:
+        return ""
+    
+    job_number, clean_desc = extract_job_number_from_description(description)
+    return clean_desc
+
 @performance_logger(output_dir='logs/performance')
 def extract_structured_data_from_email(email_body):
     """
-    Use DSPy to extract invoice information from the email body (description, amount).
+    Use DSPy to extract invoice information from the email body (description, amount, job_number).
     No duplicate checking is done; we simply return all extracted lines.
     """
     try:
@@ -111,15 +203,42 @@ def extract_structured_data_from_email(email_body):
         # Extract the list of invoices from the DSPy response
         structured_data = response.invoices
 
-        # Convert list of dicts to list of (description, amount) tuples
-        # Clean up the amounts by removing dollar signs and commas
-        extracted_data = [
-            (
-                invoice.get("Description", ""),
-                str(invoice.get("Amount", "")).replace('$', '').replace(',', '')
-            )
-            for invoice in structured_data
-        ]
+        # Process each invoice one by one to handle job number extraction and description cleaning
+        extracted_data = []
+        for invoice in structured_data:
+            description = invoice.get("Description", "").upper()
+            amount = str(invoice.get("Amount", "")).replace('$', '').replace(',', '')
+            job_number = invoice.get("JobNumber", "")
+            
+            # Extract job number from description if not already provided
+            extracted_job_number = ""
+            if not job_number:
+                extracted_job_number, description = extract_job_number_from_description(description)
+                if extracted_job_number:
+                    job_number = extracted_job_number
+                    logging.info(f"Extracted job number '{job_number}' from description")
+            else:
+                # If a job number was already provided, still clean the description
+                description = clean_description_from_job_numbers(description)
+            
+            # Format the job number with proper hyphen
+            job_number = format_job_number(job_number)
+            
+            # Add the processed invoice data
+            extracted_data.append((description, amount, job_number))
+            
+            # Log the extraction for debugging
+            logging.info(f"Extracted: Description='{description}', Amount='{amount}', JobNumber='{job_number}'")
+            
+        # Log summary of extraction
+        logging.info(f"Extracted {len(extracted_data)} invoices from email body")
+
+        # Log the extracted data
+        for index, data in enumerate(extracted_data):
+            if len(data) >= 3 and data[2]:  # If job number is present
+                logging.info(f"Extracted invoice #{index+1}: Description={data[0]}, Amount={data[1]}, JobNumber={data[2]}")
+            else:
+                logging.info(f"Extracted invoice #{index+1}: Description={data[0]}, Amount={data[1]}")
 
         return extracted_data
     except Exception as e:
@@ -436,7 +555,7 @@ def create_word_document():
         return
         
     cursor.execute("""
-        SELECT invoice_no, market, amount, batch_id, vendor, docx_file_path, service_period, description
+        SELECT invoice_no, market, amount, batch_id, vendor, docx_file_path, service_period, description, job_number
         FROM invoices
         ORDER BY id  -- Ensure rows are ordered by insertion time
     """)
@@ -452,16 +571,21 @@ def create_word_document():
     # No time filtering - just group all rows by batch_id
     batch_invoices = defaultdict(list)
     for row in all_rows:
-        # Unpack row, handling both old schema (6 fields) and new schema (8 fields)
-        if len(row) >= 8:
+        # Unpack row, handling old schema, newer schema, and newest schema with job_number
+        if len(row) >= 9:
+            invoice_no, market, amount, batch_id, source, docx_file_path, service_period, description, job_number = row
+        elif len(row) >= 8:
             invoice_no, market, amount, batch_id, source, docx_file_path, service_period, description = row
+            job_number = ""
         elif len(row) >= 7:
             invoice_no, market, amount, batch_id, source, docx_file_path, service_period = row
             description = ""
+            job_number = ""
         else:
             invoice_no, market, amount, batch_id, source, docx_file_path = row
             service_period = ""
             description = ""
+            job_number = ""
             
         try:
             # Just validate the batch_id format, don't filter by time
@@ -483,19 +607,24 @@ def create_word_document():
     # Group invoices by source (aka vendor) maintaining the original order
     grouped_invoices = defaultdict(list)
     for row in filtered_rows:
-        # Unpack row, handling both old schema (6 fields) and new schema (8 fields)
-        if len(row) >= 8:
+        # Unpack row, handling old schema, newer schema, and newest schema with job_number
+        if len(row) >= 9:
+            invoice_no, market, amount, batch_id, source, docx_file_path, service_period, description, job_number = row
+        elif len(row) >= 8:
             invoice_no, market, amount, batch_id, source, docx_file_path, service_period, description = row
+            job_number = ""
         elif len(row) >= 7:
             invoice_no, market, amount, batch_id, source, docx_file_path, service_period = row
             description = ""
+            job_number = ""
         else:
             invoice_no, market, amount, batch_id, source, docx_file_path = row
             service_period = ""
             description = ""
+            job_number = ""
             
-        # Include service_period and description in the grouped invoices
-        grouped_invoices[source].append((invoice_no, market, amount, batch_id, docx_file_path, service_period, description))
+        # Include service_period, description, and job_number in the grouped invoices
+        grouped_invoices[source].append((invoice_no, market, amount, batch_id, docx_file_path, service_period, description, job_number))
 
     logging.info(f"Grouped Invoices by vendor: {dict([(k, len(v)) for k, v in grouped_invoices.items()])}")
 
@@ -508,7 +637,7 @@ def create_word_document():
     def remove_control_characters(text):
         return control_chars_re.sub('', text)
 
-    def add_invoice_page(doc, invoice_no, market, amount, add_pagebreak=True, description="", service_period=""):
+    def add_invoice_page(doc, invoice_no, market, amount, add_pagebreak=True, description="", service_period="", job_number=""):
         """Add an invoice page with optional page break"""
         header_lines = [
             os.getenv("HEADER_LINE_1", ""),
@@ -528,6 +657,9 @@ def create_word_document():
         page_content = invoice.invoice_string  # from your "invoice" module
         page_content = page_content.replace('<<invoice>>', str(invoice_no))
         
+        # Replace job number placeholder if available
+        page_content = page_content.replace('<<job>>', str(job_number) if job_number else "")
+        
         # Format description to start with market name
         # If we have both market and description, format as "Market - Description"
         # If service period is available, append it in parentheses
@@ -544,6 +676,8 @@ def create_word_document():
         # Add service period in parentheses if available
         if service_period and service_period.strip():
             display_text = f"{display_text} ({service_period})"
+        
+        # IMPORTANT: Don't append job number to description - it's handled separately in <<job>> placeholder
             
         page_content = page_content.replace('<<description>>', display_text)
         
@@ -703,17 +837,25 @@ def create_word_document():
         # Build each invoice page
         for invoice_data in invoice_list:
             # Unpack invoice data with variable length handling
-            if len(invoice_data) >= 7:
+            if len(invoice_data) >= 8:
+                invoice_no, market, amount, batch_id, docx_file_path, service_period, description, job_number = invoice_data
+            elif len(invoice_data) >= 7:
                 invoice_no, market, amount, batch_id, docx_file_path, service_period, description = invoice_data
+                job_number = ""
             elif len(invoice_data) >= 6:
                 invoice_no, market, amount, batch_id, docx_file_path, service_period = invoice_data
                 description = ""
+                job_number = ""
             else:
                 invoice_no, market, amount, batch_id, docx_file_path = invoice_data
                 service_period = ""
                 description = ""
+                job_number = ""
                 
-            logging.info(f"Adding invoice: {invoice_no}, market: {market}, amount: {amount}, service_period: {service_period}")
+            log_msg = f"Adding invoice: {invoice_no}, market: {market}, amount: {amount}, service_period: {service_period}"
+            if job_number:
+                log_msg += f", job: {job_number}"
+            logging.info(log_msg)
             
             # Find matching images for this invoice (do this only once)
             # Use a composite key that includes service period to handle duplicate markets with different service periods
@@ -771,7 +913,7 @@ def create_word_document():
                 
             has_images = len(matching_images) > 0
             
-            # Add the invoice page with description and service period
+            # Add the invoice page with description, service period, and job number
             add_invoice_page(
                 new_doc, 
                 invoice_no, 
@@ -779,7 +921,8 @@ def create_word_document():
                 amount, 
                 not has_images,  # Only add page break if no images
                 description=description,
-                service_period=service_period
+                service_period=service_period,
+                job_number=job_number
             )
             
             # Handle images based on vendor type

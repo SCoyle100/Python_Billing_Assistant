@@ -29,20 +29,31 @@ def ensure_invoices_table_exists(cursor):
     Create the invoices table if it does not already exist, 
     matching the structure used in matrix_media_dataframe.py.
     """
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS invoices (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            batch_id TEXT,
-            invoice_no TEXT,
-            vendor TEXT,
-            amount TEXT,
-            date TEXT,
-            market TEXT,
-            service_period TEXT,
-            description TEXT,
-            docx_file_path TEXT
-        );
-    """)
+    # First check if job_number column already exists
+    cursor.execute("PRAGMA table_info(invoices)")
+    columns = cursor.fetchall()
+    columns_names = [column[1] for column in columns]
+    
+    if "invoices" not in columns_names:
+        # Create table if it doesn't exist
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS invoices (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_id TEXT,
+                invoice_no TEXT,
+                vendor TEXT,
+                amount TEXT,
+                date TEXT,
+                market TEXT,
+                service_period TEXT,
+                description TEXT,
+                docx_file_path TEXT,
+                job_number TEXT
+            );
+        """)
+    elif "job_number" not in columns_names:
+        # Add job_number column if it doesn't exist
+        cursor.execute("ALTER TABLE invoices ADD COLUMN job_number TEXT;")
 
 
 
@@ -58,7 +69,7 @@ def get_last_invoice_number(cursor):
 
 
 
-def increment_invoice_number(last_inv_no, suffix, default_start="112530"):
+def increment_invoice_number(last_inv_no, suffix, default_start="112535"):
     """
     Increment the numeric portion of the last_invoice_no and then 
     append the given suffix. If last_invoice_no is None or parsing 
@@ -224,7 +235,7 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
         logging.info(f"Starting fresh invoice sequence from last invoice: {last_inv_no}")
         first_invoice = increment_invoice_number(last_inv_no, suffix)
     else:
-        first_invoice = f"112530{suffix}"  # Updated default starting point
+        first_invoice = f"112535{suffix}"  # Updated default starting point
         logging.info(f"No previous invoices found, starting at default: {first_invoice}")
     
     # First, normalize all market descriptions and prepare for sorting
@@ -409,13 +420,71 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
                             description = item_dict.get('Description', '')
                             break
                     
-        # Insert into the database
+        # Get job number if available (for data from email extraction)
+        job_number = ""
+        
+        # Check if any of the invoice items in the original invoices list has a job number
+        # Job number would be in the third position if present
+        for item in invoices:
+            if isinstance(item, tuple) and len(item) >= 3:
+                # Check if the third element might be a job number
+                potential_job = item[2] if item[2] is not None else ""
+                
+                # Match market name (normalized_desc) with item's description (item[0])
+                # Use a more flexible match to handle minor differences in whitespace/case
+                item_desc = str(item[0]).strip().upper() if item[0] is not None else ""
+                norm_desc = normalized_desc.strip().upper()
+                
+                # If descriptions match approximately and we have a potential job number
+                desc_match = (
+                    item_desc == norm_desc or 
+                    item_desc.startswith(norm_desc + " ") or 
+                    norm_desc.startswith(item_desc + " ")
+                )
+                
+                if potential_job and desc_match:
+                    job_number = potential_job
+                    logging.info(f"Found job number '{job_number}' for market '{normalized_desc}'")
+                    break
+                
+        # If we still don't have a job number, try to extract it from the description
+        # This requires importing re module, but if we don't have access to the extract_job_number_from_description
+        # function, we can do a simple check for common patterns
+        if not job_number and description:
+            # Look for patterns like "TTC 350" or "TTC-350" in the description
+            import re
+            job_match = re.search(r"\b([A-Za-z]{2,4}[-\s]*\d{2,4})\b", description, re.IGNORECASE)
+            if job_match:
+                potential_job = job_match.group(1)
+                # Make sure it has a hyphen
+                if "-" not in potential_job:
+                    parts = re.match(r"([A-Za-z]+)\s*(\d+)", potential_job)
+                    if parts:
+                        prefix, number = parts.groups()
+                        potential_job = f"{prefix}-{number}"
+                job_number = potential_job
+                logging.info(f"Extracted job number '{job_number}' from description")
+                
+                # Clean the description - remove the job number portion
+                description = re.sub(r"\b[A-Za-z]{2,4}[-\s]*\d{2,4}\b", "", description, flags=re.IGNORECASE)
+                description = re.sub(r"\s+", " ", description).strip()
+                logging.info(f"Cleaned description: '{description}'")
+                
+        # Final formatting of job number (if any)
+        if job_number and "-" not in job_number:
+            # Format job numbers like "TTC 350" to "TTC-350"
+            parts = re.match(r"([A-Za-z]+)\s*(\d+)", job_number)
+            if parts:
+                prefix, number = parts.groups()
+                job_number = f"{prefix}-{number}"
+                    
+        # Insert into the database with job_number
         cursor.execute(
             """
-            INSERT INTO invoices (batch_id, invoice_no, vendor, amount, date, market, service_period, description, docx_file_path)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO invoices (batch_id, invoice_no, vendor, amount, date, market, service_period, description, docx_file_path, job_number)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (batch_id, current_invoice_no, source, formatted_amount, today_str, normalized_desc, service_period, description, docx_file_path)
+            (batch_id, current_invoice_no, source, formatted_amount, today_str, normalized_desc, service_period, description, docx_file_path, job_number)
         )
     
     # Print the market-to-invoice mapping for debugging
