@@ -58,7 +58,7 @@ def get_last_invoice_number(cursor):
 
 
 
-def increment_invoice_number(last_inv_no, suffix, default_start="112524"):
+def increment_invoice_number(last_inv_no, suffix, default_start="112530"):
     """
     Increment the numeric portion of the last_invoice_no and then 
     append the given suffix. If last_invoice_no is None or parsing 
@@ -224,7 +224,7 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
         logging.info(f"Starting fresh invoice sequence from last invoice: {last_inv_no}")
         first_invoice = increment_invoice_number(last_inv_no, suffix)
     else:
-        first_invoice = f"112524{suffix}"  # Updated default starting point
+        first_invoice = f"112530{suffix}"  # Updated default starting point
         logging.info(f"No previous invoices found, starting at default: {first_invoice}")
     
     # First, normalize all market descriptions and prepare for sorting
@@ -353,7 +353,9 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
             market_invoice_map[composite_key] = [current_invoice_no]
             
         # Format the amount with dollar sign, comma separators, and two decimal places
-        formatted_amount = f"${float(amt):,.2f}"
+        # Strip any existing dollar sign and commas before converting to float
+        clean_amt = str(amt).replace('$', '').replace(',', '')
+        formatted_amount = f"${float(clean_amt):,.2f}"
             
         # Add to our enhanced invoices list with service period and description
         # This ensures each market+service_period combination gets its own unique invoice number in image filenames

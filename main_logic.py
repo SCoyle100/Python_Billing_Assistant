@@ -112,10 +112,11 @@ def extract_structured_data_from_email(email_body):
         structured_data = response.invoices
 
         # Convert list of dicts to list of (description, amount) tuples
+        # Clean up the amounts by removing dollar signs and commas
         extracted_data = [
             (
                 invoice.get("Description", ""),
-                invoice.get("Amount", "")
+                str(invoice.get("Amount", "")).replace('$', '').replace(',', '')
             )
             for invoice in structured_data
         ]
@@ -327,15 +328,36 @@ def handle_vendor_identification(pdf_file_path, vendor_map=None):
                     print(f"Market: '{market}', Amount: {amount}, Invoice: {inv_no}, Service Period: '{service_period}', Description: '{description}'")
             
             print("DEBUG: Page to market mapping:")
-            for page, market in page_to_market.items():
-                print(f"Page {page}: '{market}'")
+            for page, page_data in page_to_market.items():
+                if isinstance(page_data, tuple) and len(page_data) == 2:
+                    market, service_period = page_data
+                    print(f"Page {page}: market='{market}', service_period='{service_period}'")
+                else:
+                    print(f"Page {page}: '{page_data}'")
+                    
+            # Ensure we use a simplified version of page_to_market with consistent service periods
+            normalized_page_mapping = {}
+            for page_num, page_data in page_to_market.items():
+                if isinstance(page_data, tuple) and len(page_data) == 2:
+                    market, service_period = page_data
+                    # Normalize market name to match database
+                    if any(fp in market.lower() for fp in ["fort payne", "ft. payne", "ft payne"]):
+                        market = "Fort Payne"
+                    normalized_page_mapping[page_num] = (market, service_period)
+                else:
+                    normalized_page_mapping[page_num] = (page_data, "")
+            
+            print("DEBUG: NORMALIZED Page to market mapping:")
+            for page, page_data in normalized_page_mapping.items():
+                market, service_period = page_data
+                print(f"Page {page}: market='{market}', service_period='{service_period}'")
 
             # Create images from the Word document
             images = create_images_from_docx(
                 docx_file_path, 
                 "Matrix Media", 
                 invoice_data=enhanced_invoices, 
-                page_market_mapping=page_to_market
+                page_market_mapping=normalized_page_mapping
             )    
 
 
@@ -414,7 +436,7 @@ def create_word_document():
         return
         
     cursor.execute("""
-        SELECT invoice_no, market, amount, batch_id, vendor, docx_file_path
+        SELECT invoice_no, market, amount, batch_id, vendor, docx_file_path, service_period, description
         FROM invoices
         ORDER BY id  -- Ensure rows are ordered by insertion time
     """)
@@ -430,7 +452,17 @@ def create_word_document():
     # No time filtering - just group all rows by batch_id
     batch_invoices = defaultdict(list)
     for row in all_rows:
-        invoice_no, market, amount, batch_id, source, docx_file_path = row
+        # Unpack row, handling both old schema (6 fields) and new schema (8 fields)
+        if len(row) >= 8:
+            invoice_no, market, amount, batch_id, source, docx_file_path, service_period, description = row
+        elif len(row) >= 7:
+            invoice_no, market, amount, batch_id, source, docx_file_path, service_period = row
+            description = ""
+        else:
+            invoice_no, market, amount, batch_id, source, docx_file_path = row
+            service_period = ""
+            description = ""
+            
         try:
             # Just validate the batch_id format, don't filter by time
             datetime.datetime.strptime(batch_id, "%Y%m%d_%H%M%S")
@@ -451,8 +483,19 @@ def create_word_document():
     # Group invoices by source (aka vendor) maintaining the original order
     grouped_invoices = defaultdict(list)
     for row in filtered_rows:
-        invoice_no, market, amount, batch_id, source, docx_file_path = row
-        grouped_invoices[source].append((invoice_no, market, amount, batch_id, docx_file_path))
+        # Unpack row, handling both old schema (6 fields) and new schema (8 fields)
+        if len(row) >= 8:
+            invoice_no, market, amount, batch_id, source, docx_file_path, service_period, description = row
+        elif len(row) >= 7:
+            invoice_no, market, amount, batch_id, source, docx_file_path, service_period = row
+            description = ""
+        else:
+            invoice_no, market, amount, batch_id, source, docx_file_path = row
+            service_period = ""
+            description = ""
+            
+        # Include service_period and description in the grouped invoices
+        grouped_invoices[source].append((invoice_no, market, amount, batch_id, docx_file_path, service_period, description))
 
     logging.info(f"Grouped Invoices by vendor: {dict([(k, len(v)) for k, v in grouped_invoices.items()])}")
 
@@ -465,7 +508,7 @@ def create_word_document():
     def remove_control_characters(text):
         return control_chars_re.sub('', text)
 
-    def add_invoice_page(doc, invoice_no, market, amount, add_pagebreak=True):
+    def add_invoice_page(doc, invoice_no, market, amount, add_pagebreak=True, description="", service_period=""):
         """Add an invoice page with optional page break"""
         header_lines = [
             os.getenv("HEADER_LINE_1", ""),
@@ -484,7 +527,25 @@ def create_word_document():
         doc.add_paragraph('')
         page_content = invoice.invoice_string  # from your "invoice" module
         page_content = page_content.replace('<<invoice>>', str(invoice_no))
-        page_content = page_content.replace('<<description>>', str(market))
+        
+        # Format description to start with market name
+        # If we have both market and description, format as "Market - Description"
+        # If service period is available, append it in parentheses
+        if description and description.strip() and market and market.strip():
+            # If description doesn't already start with the market name
+            if not description.strip().startswith(market.strip()):
+                display_text = f"{market} - {description}"
+            else:
+                display_text = description
+        else:
+            # Use whichever one is available (usually market)
+            display_text = str(description) if description and description.strip() else str(market)
+        
+        # Add service period in parentheses if available
+        if service_period and service_period.strip():
+            display_text = f"{display_text} ({service_period})"
+            
+        page_content = page_content.replace('<<description>>', display_text)
         
         # Format the amount with dollar sign and two decimal places
         if isinstance(amount, str) and amount.startswith('$'):
@@ -618,6 +679,15 @@ def create_word_document():
     # Process vendors in a specific order based on your requirements
     vendor_processing_order = ["FEE INVOICES", "Matrix Media", "Capitol Media"]
     
+    # Keep track of images that have been inserted to avoid duplicates
+    processed_images = set()
+    
+    # Keep track of invoice numbers that have been processed to avoid duplicate image insertions
+    processed_invoice_numbers = set()
+    
+    # Debug counter for image insertions
+    image_insert_count = 0
+    
     # Process each vendor in the desired order
     for vendor_name in vendor_processing_order:
         if vendor_name not in grouped_invoices:
@@ -631,89 +701,127 @@ def create_word_document():
         capitol_media_all_images = []
 
         # Build each invoice page
-        for (invoice_no, market, amount, batch_id, docx_file_path) in invoice_list:
-            logging.info(f"Adding invoice: {invoice_no}, market: {market}, amount: {amount}")
+        for invoice_data in invoice_list:
+            # Unpack invoice data with variable length handling
+            if len(invoice_data) >= 7:
+                invoice_no, market, amount, batch_id, docx_file_path, service_period, description = invoice_data
+            elif len(invoice_data) >= 6:
+                invoice_no, market, amount, batch_id, docx_file_path, service_period = invoice_data
+                description = ""
+            else:
+                invoice_no, market, amount, batch_id, docx_file_path = invoice_data
+                service_period = ""
+                description = ""
+                
+            logging.info(f"Adding invoice: {invoice_no}, market: {market}, amount: {amount}, service_period: {service_period}")
+            
             # Find matching images for this invoice (do this only once)
-            matching_images = find_invoice_images(invoice_no, market, vendor_name)
+            # Use a composite key that includes service period to handle duplicate markets with different service periods
+            invoice_key = f"{invoice_no}_{market}_{service_period}".replace(" ", "_").lower()
+            
+            # If we've already processed this specific invoice for this market and service period, skip it
+            if invoice_key in processed_invoice_numbers:
+                logging.info(f"Skipping already processed invoice: {invoice_no}, market: {market}, service period: {service_period}")
+                continue
+                
+            # Mark this invoice as processed
+            processed_invoice_numbers.add(invoice_key)
+            
+            # Initialize image cache if needed
+            if not hasattr(create_word_document, 'image_cache'):
+                create_word_document.image_cache = {}
+                
+            # Try to get images from cache or find them
+            if invoice_key in create_word_document.image_cache:
+                matching_images = create_word_document.image_cache[invoice_key]
+                logging.info(f"Using cached images for {invoice_no}, {market}, {service_period}")
+            else:
+                matching_images = find_invoice_images(invoice_no, market, vendor_name)
+                
+                # Special handling for Fort Payne if no images found in the regular search
+                is_fort_payne = vendor_name == "Matrix Media" and (
+                    "Fort Payne" in market or "Ft. Payne" in market or "Ft Payne" in market
+                )
+                
+                if is_fort_payne and not matching_images:
+                    logging.info(f"Fort Payne invoice with no images - searching for any Fort Payne images")
+                    # Build a more general pattern for Fort Payne
+                    fort_payne_pattern = f"*{invoice_no}*fort*payne*.png"
+                    fort_payne_images = []
+                    
+                    # Search in all image directories
+                    for image_dir in [
+                        os.path.join(os.getcwd(), "downloaded files email"),
+                        os.path.join(os.getcwd(), "pdf images"),
+                        os.path.join(os.getcwd(), "images"),
+                        os.path.join(os.getcwd(), "output"),
+                        os.getcwd()
+                    ]:
+                        if os.path.exists(image_dir):
+                            for f in os.listdir(image_dir):
+                                if f.lower().endswith('.png') and fnmatch.fnmatch(f.lower(), fort_payne_pattern.lower()):
+                                    fort_payne_images.append(os.path.join(image_dir, f))
+                    
+                    if fort_payne_images:
+                        logging.info(f"Found {len(fort_payne_images)} Fort Payne images for invoice {invoice_no}")
+                        matching_images = fort_payne_images
+                
+                # Cache the images we found (including Fort Payne special search results)
+                create_word_document.image_cache[invoice_key] = matching_images
+                
             has_images = len(matching_images) > 0
-            add_invoice_page(new_doc, invoice_no, market, amount, not has_images)
+            
+            # Add the invoice page with description and service period
+            add_invoice_page(
+                new_doc, 
+                invoice_no, 
+                market, 
+                amount, 
+                not has_images,  # Only add page break if no images
+                description=description,
+                service_period=service_period
+            )
             
             # Handle images based on vendor type
-            if vendor_name == "Matrix Media":
-                # Special handling for Fort Payne in Matrix Media
-                is_fort_payne = "Fort Payne" in market or "Ft. Payne" in market or "Ft Payne" in market
-                
-                if is_fort_payne:
-                    logging.info(f"Special handling for Fort Payne invoice {invoice_no}")
+            if vendor_name in ["Matrix Media", "FEE INVOICES"]:
+                # For both Matrix Media and FEE INVOICES, add images directly after the invoice
+                logging.info(f"Processing images for invoice_key: {invoice_key}")
                 
                 if matching_images:
-                    logging.info(f"Adding {len(matching_images)} images for {vendor_name} invoice {invoice_no}")
+                    logging.info(f"Adding {len(matching_images)} images for {vendor_name} invoice {invoice_no} - market: '{market}', service period: '{service_period}'")
+                    images_added = 0
                     for img_path in matching_images:
+                        # Skip images we've already processed
+                        if img_path in processed_images:
+                            logging.info(f"Skipping already processed image: {img_path}")
+                            continue
+                            
                         try:
                             logging.info(f"Adding image to document: {img_path}")
                             new_doc.add_page_break()
                             new_doc.add_picture(img_path, width=Inches(6))
-                            logging.info(f"Successfully added image: {img_path}")
+                            processed_images.add(img_path)  # Mark as processed
+                            images_added += 1
+                            image_insert_count += 1
+                            logging.info(f"Successfully added image: {img_path} (Total images: {image_insert_count})")
                         except Exception as e:
                             logging.error(f"Error adding image {img_path}: {str(e)}")
-                    new_doc.add_page_break()
-                else:
-                    logging.warning(f"No images found for Matrix Media invoice {invoice_no}")
                     
-                    # Special handling for Fort Payne - search for any Fort Payne images
-                    if is_fort_payne:
-                        logging.info(f"Fort Payne invoice - searching for any Fort Payne images")
-                        # Build a more general pattern for Fort Payne
-                        fort_payne_pattern = f"*{invoice_no}*fort*payne*.png"
-                        fort_payne_images = []
-                        
-                        # Search in all image directories
-                        for image_dir in [
-                            os.path.join(os.getcwd(), "downloaded files email"),
-                            os.path.join(os.getcwd(), "pdf images"),
-                            os.path.join(os.getcwd(), "images"),
-                            os.path.join(os.getcwd(), "output"),
-                            os.getcwd()
-                        ]:
-                            if os.path.exists(image_dir):
-                                for f in os.listdir(image_dir):
-                                    if f.lower().endswith('.png') and fnmatch.fnmatch(f.lower(), fort_payne_pattern.lower()):
-                                        fort_payne_images.append(os.path.join(image_dir, f))
-                        
-                        if fort_payne_images:
-                            logging.info(f"Found {len(fort_payne_images)} Fort Payne images for invoice {invoice_no}")
-                            for img_path in fort_payne_images:
-                                try:
-                                    logging.info(f"Adding Fort Payne image: {img_path}")
-                                    new_doc.add_page_break()
-                                    new_doc.add_picture(img_path, width=Inches(6))
-                                except Exception as e:
-                                    logging.error(f"Error adding Fort Payne image {img_path}: {str(e)}")
-                            new_doc.add_page_break()
+                    # Only add a page break if we actually added images
+                    if images_added > 0:
+                        new_doc.add_page_break()
+                else:
+                    logging.warning(f"No images found for {vendor_name} invoice {invoice_no}")
             
             elif vendor_name == "Capitol Media":
                 # For Capitol Media, collect all images to add after all invoices
                 if matching_images:
                     logging.info(f"Collecting {len(matching_images)} images for Capitol Media invoice {invoice_no}")
                     capitol_media_all_images.extend(matching_images)
-                
-            elif vendor_name == "FEE INVOICES":
-                # Add images immediately after each FEE INVOICE
-                if matching_images:
-                    logging.info(f"Adding {len(matching_images)} images for {vendor_name} invoice {invoice_no}")
-                    for img_path in matching_images:
-                        try:
-                            logging.info(f"Adding image to document: {img_path}")
-                            new_doc.add_page_break()
-                            new_doc.add_picture(img_path, width=Inches(6))
-                            logging.info(f"Successfully added image: {img_path}")
-                        except Exception as e:
-                            logging.error(f"Error adding image {img_path}: {str(e)}")
-                    new_doc.add_page_break()
-                else:
-                    logging.warning(f"No images found for FEE INVOICES invoice {invoice_no}")
         
         # For Capitol Media, add all collected images after all invoices
+        # NOTE: We implemented duplicate prevention for Matrix Media above by tracking invoice_numbers.
+        # Similar changes might be needed here for Capitol Media if duplicate images are observed.
         if vendor_name == "Capitol Media" and capitol_media_all_images:
             logging.info(f"Adding {len(capitol_media_all_images)} images for all Capitol Media invoices")
             for img_path in capitol_media_all_images:
