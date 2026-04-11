@@ -216,7 +216,7 @@ def _add_lines_to_cell(
     cell,
     lines,
     *,
-    font_name="Arial",
+    font_name="Times New Roman",
     font_size=9,
     alignment=WD_ALIGN_PARAGRAPH.LEFT,
     bold=False,
@@ -264,6 +264,59 @@ def _set_row_min_height(row, value=360):
     tr_height.set(qn("w:val"), str(value))
     tr_height.set(qn("w:hRule"), "atLeast")
     tr_pr.append(tr_height)
+
+
+def _set_cell_border(cell, edge, value):
+    tc_pr = cell._tc.get_or_add_tcPr()
+    tc_borders = tc_pr.first_child_found_in("w:tcBorders")
+    if tc_borders is None:
+        tc_borders = OxmlElement("w:tcBorders")
+        tc_pr.append(tc_borders)
+
+    border = tc_borders.find(qn(f"w:{edge}"))
+    if border is None:
+        border = OxmlElement(f"w:{edge}")
+        tc_borders.append(border)
+
+    border.set(qn("w:val"), value)
+    if value != "nil":
+        border.set(qn("w:sz"), "4")
+        border.set(qn("w:space"), "0")
+        border.set(qn("w:color"), "000000")
+
+
+def _style_detail_row_borders(row):
+    if len(row.cells) < 2:
+        return
+
+    left_cell = row.cells[0]
+    right_cell = row.cells[-1]
+
+    for cell in (left_cell, right_cell):
+        _set_cell_border(cell, "top", "nil")
+        _set_cell_border(cell, "bottom", "nil")
+
+    _set_cell_border(left_cell, "left", "single")
+    _set_cell_border(left_cell, "right", "single")
+    _set_cell_border(right_cell, "left", "single")
+    _set_cell_border(right_cell, "right", "single")
+
+
+def _style_total_row_borders(row):
+    if len(row.cells) < 2:
+        return
+
+    left_cell = row.cells[0]
+    right_cell = row.cells[-1]
+
+    for cell in (left_cell, right_cell):
+        _set_cell_border(cell, "top", "single")
+        _set_cell_border(cell, "bottom", "single")
+
+    _set_cell_border(left_cell, "left", "single")
+    _set_cell_border(left_cell, "right", "single")
+    _set_cell_border(right_cell, "left", "single")
+    _set_cell_border(right_cell, "right", "single")
 
 
 def rebuild_capitol_media_table(docx_path, invoice_rows):
@@ -321,6 +374,7 @@ def rebuild_capitol_media_table(docx_path, invoice_rows):
         _remove_row_height(row)
         _set_row_min_height(row, 360 if amount_text else 520)
         _populate_invoice_row(row, description_lines, amount_text)
+        _style_detail_row_borders(row)
 
     total_row = table.rows[inserted_rows_start + len(row_specs)]
     _remove_row_height(total_row)
@@ -336,6 +390,7 @@ def rebuild_capitol_media_table(docx_path, invoice_rows):
         alignment=WD_ALIGN_PARAGRAPH.RIGHT,
         bold=True,
     )
+    _style_total_row_borders(total_row)
 
     doc.save(docx_path)
     logging.info("Rebuilt Capitol Media pricing table in %s", docx_path)
