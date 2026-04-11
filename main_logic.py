@@ -34,10 +34,8 @@ from vendor_invoice_logic.matrix_media_dataframe import (
 
 from vendor_invoice_logic.matrix_media_market_map import read_page_markets
 
-from vendor_invoice_logic.capitol_media_logic_ import split_large_amounts_and_format
-
-
 from vendor_invoice_logic.capitol_media_dataframe_1 import build_dataframe_from_capitol_media
+from vendor_invoice_logic.capitol_media_rebuild import rebuild_capitol_media_table
 
 
 from image_generation.create_pdf_image import create_images_from_docx
@@ -498,7 +496,6 @@ def handle_vendor_identification(pdf_file_path, vendor_map=None):
 
         case "Capitol Hill Media":
             print(f"Executing script for {base_name}, vendor is Capitol Hill Media...")
-            split_large_amounts_and_format(docx_file_path)
             df_invoices = build_dataframe_from_capitol_media(docx_file_path)
             
             # Debug: Print dataframe info
@@ -517,6 +514,11 @@ def handle_vendor_identification(pdf_file_path, vendor_map=None):
                 invoices_list = list(
                 df_invoices[['Market', 'Amount']].itertuples(index=False, name=None)
                 )
+
+            if invoices_list:
+                rebuild_capitol_media_table(docx_file_path, invoices_list)
+            else:
+                logging.warning("Skipping Capitol Media table rebuild because no invoice rows were extracted.")
             
 
             '''

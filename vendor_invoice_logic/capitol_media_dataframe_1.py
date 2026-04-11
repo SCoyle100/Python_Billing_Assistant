@@ -38,7 +38,13 @@ def extract_capitol_media_rows_with_openai(table_text):
             "Extract Capitol Media invoice rows from the provided table text. "
             "Return a JSON object with one key, 'invoices', containing an array of objects. "
             "Each object must use exactly these keys: Description and Amount. "
-            "Only include rows that have a real billable amount."
+            "Only include rows that have a real positive billable amount. "
+            "Do not include narrative/header text, campaign summary text, city-list intro text, "
+            "discount lines, markup lines, commission lines, rebate lines, credit lines, or any negative amounts. "
+            "The table may begin with one or two descriptive lines before the market rows start; those belong to the "
+            "intro section and must not be included in invoices. "
+            "If a line mixes a market name with discount text, keep only the market name. "
+            "If the first positive amount corresponds to the first actual market after an intro section, output just the market name."
         ),
         user_prompt=f"Table text:\n{table_text}",
         max_tokens=2500,
