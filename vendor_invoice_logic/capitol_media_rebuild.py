@@ -150,6 +150,28 @@ def _extract_intro_lines(detail_row):
     return intro_lines
 
 
+def _normalize_intro_lines(intro_lines):
+    normalized_lines = list(intro_lines)
+    if len(normalized_lines) < 2:
+        return normalized_lines
+
+    city_line = normalized_lines[-1].strip()
+    comma_parts = [part.strip() for part in city_line.split(",") if part.strip()]
+    if len(comma_parts) < 2:
+        return normalized_lines
+
+    first_city = comma_parts[0]
+    last_part = comma_parts[-1]
+    first_words = first_city.split()
+    last_words = last_part.split()
+    if first_words and last_words[-len(first_words):] == first_words:
+        trimmed_last_part = " ".join(last_words[:-len(first_words)]).strip(" ,")
+        comma_parts[-1] = trimmed_last_part
+        normalized_lines[-1] = ", ".join(part for part in comma_parts if part)
+
+    return normalized_lines
+
+
 def _extract_adjusted_amounts(detail_row):
     """
     Read the original amount paragraph sequence and fold negative discount rows
@@ -180,6 +202,17 @@ def _extract_adjusted_amounts_from_row(row):
             adjusted_amounts[-1] += abs(amount)
 
     return adjusted_amounts
+
+
+def _capture_paragraph_properties(cell):
+    properties = []
+    for paragraph in cell.paragraphs:
+        text = paragraph.text.strip()
+        if text and paragraph._p.pPr is not None:
+            properties.append(deepcopy(paragraph._p.pPr))
+        elif text:
+            properties.append(None)
+    return properties
 
 
 def _apply_adjusted_amounts(invoice_rows, adjusted_amounts):
@@ -220,12 +253,19 @@ def _add_lines_to_cell(
     font_size=9,
     alignment=WD_ALIGN_PARAGRAPH.LEFT,
     bold=False,
+    paragraph_properties=None,
 ):
     _clear_cell(cell)
 
     normalized_lines = list(lines) if lines else [""]
     for line_index, line in enumerate(normalized_lines):
-        paragraph = cell.add_paragraph() if line_index > 0 else cell.add_paragraph()
+        paragraph = cell.add_paragraph()
+        if (
+            paragraph_properties
+            and line_index < len(paragraph_properties)
+            and paragraph_properties[line_index] is not None
+        ):
+            paragraph._p.insert(0, deepcopy(paragraph_properties[line_index]))
         paragraph.alignment = alignment
         run = paragraph.add_run(str(line))
         run.font.name = font_name
@@ -233,11 +273,12 @@ def _add_lines_to_cell(
         run.bold = bold
 
 
-def _populate_invoice_row(row, description_lines, amount_text=""):
+def _populate_invoice_row(row, description_lines, amount_text="", description_paragraph_properties=None):
     _add_lines_to_cell(
         row.cells[0],
         description_lines,
         alignment=WD_ALIGN_PARAGRAPH.LEFT,
+        paragraph_properties=description_paragraph_properties,
     )
     _add_lines_to_cell(
         row.cells[-1],
@@ -341,7 +382,8 @@ def rebuild_capitol_media_table(docx_path, invoice_rows):
 
     original_detail_row = table.rows[detail_row_index]
     original_total_row = table.rows[total_row_index]
-    preserved_intro_lines = _extract_intro_lines(original_detail_row)
+    preserved_intro_lines = _normalize_intro_lines(_extract_intro_lines(original_detail_row))
+    intro_paragraph_properties = _capture_paragraph_properties(original_detail_row.cells[0])
     adjusted_amounts = _extract_adjusted_amounts_from_row(original_detail_row)
 
     detail_template = deepcopy(original_detail_row._tr)
@@ -356,10 +398,27 @@ def rebuild_capitol_media_table(docx_path, invoice_rows):
     row_specs = []
 
     if preserved_intro_lines:
-        row_specs.append((preserved_intro_lines, ""))
+        intro_display_lines = []
+        intro_display_properties = []
+        for index, line in enumerate(preserved_intro_lines):
+            if index == 1:
+                intro_display_lines.append("")
+                intro_display_properties.append(
+                    intro_paragraph_properties[min(index, len(intro_paragraph_properties) - 1)]
+                    if intro_paragraph_properties else None
+                )
+            intro_display_lines.append(line)
+            intro_display_properties.append(
+                intro_paragraph_properties[min(index, len(intro_paragraph_properties) - 1)]
+                if intro_paragraph_properties else None
+            )
+        row_specs.append((intro_display_lines, "", intro_display_properties))
+        row_specs.extend([([""], "", None), ([""], "", None)])
 
     for description_lines, amount in detail_rows:
-        row_specs.append((description_lines, amount))
+        row_specs.append((description_lines, amount, None))
+
+    row_specs.extend([([""], "", None), ([""], "", None), ([""], "", None)])
 
     row_templates = [deepcopy(detail_template) for _ in row_specs]
     row_templates.append(deepcopy(total_template))
@@ -369,11 +428,14 @@ def rebuild_capitol_media_table(docx_path, invoice_rows):
         header_tr.addnext(template)
 
     inserted_rows_start = detail_row_index
-    for offset, (description_lines, amount_text) in enumerate(row_specs):
+    for offset, (description_lines, amount_text, paragraph_properties) in enumerate(row_specs):
         row = table.rows[inserted_rows_start + offset]
         _remove_row_height(row)
-        _set_row_min_height(row, 360 if amount_text else 520)
-        _populate_invoice_row(row, description_lines, amount_text)
+        if paragraph_properties:
+            _set_row_min_height(row, 640)
+        else:
+            _set_row_min_height(row, 220 if not any(line.strip() for line in description_lines) and not amount_text else 360)
+        _populate_invoice_row(row, description_lines, amount_text, paragraph_properties)
         _style_detail_row_borders(row)
 
     total_row = table.rows[inserted_rows_start + len(row_specs)]
@@ -386,7 +448,7 @@ def rebuild_capitol_media_table(docx_path, invoice_rows):
     )
     _add_lines_to_cell(
         total_row.cells[-1],
-        [f"Total {_format_currency(running_total)}"],
+        [f"TOTAL: {_format_currency(running_total)}"],
         alignment=WD_ALIGN_PARAGRAPH.RIGHT,
         bold=True,
     )
