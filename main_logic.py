@@ -12,7 +12,6 @@ import docx
 from docx.shared import Pt
 from docx.shared import Inches
 from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
-import dspy
 import invoice  # Ensure your invoice template module is imported
 
 from pdf_to_docx_ import PDFConverter
@@ -35,7 +34,7 @@ from vendor_invoice_logic.matrix_media_dataframe import (
 
 from vendor_invoice_logic.matrix_media_market_map import read_page_markets
 
-from vendor_invoice_logic.capitol_media_logic import split_large_amounts_and_format
+from vendor_invoice_logic.capitol_media_logic_ import split_large_amounts_and_format
 
 
 from vendor_invoice_logic.capitol_media_dataframe_1 import build_dataframe_from_capitol_media
@@ -44,6 +43,7 @@ from vendor_invoice_logic.capitol_media_dataframe_1 import build_dataframe_from_
 from image_generation.create_pdf_image import create_images_from_docx
 
 from utils.pdf_utils import combine_vendor_pdfs
+from utils.openai_json import chat_completion_json
 
 
 #from vendor_invoice_logic.capitol_media_logic import split_large_amounts_and_format
@@ -72,33 +72,22 @@ configure_logging(logs_dir='logs', console_level=logging.INFO, file_level=loggin
 app = QApplication(sys.argv)
 
 
-# Configure DSPy with your OpenAI API key
-dspy.configure(lm=dspy.LM('openai/gpt-4o'))
-
-
-
-
-# Define DSPy signature with the user-provided date format
-class ExtractInvoiceInfo(dspy.Signature):
-    """
-    Extract invoice information including description, amount, and job number if available. 
-    Look for text like 'job:' or 'job #' or 'job number:' followed by an identifier (e.g., 'TTC-350').
-    """
-    
-    text: str = dspy.InputField()
-    invoices: list[dict[str, str]] = dspy.OutputField(
-        desc="List of invoices, each with keys: Description, Amount, JobNumber (if available)"
+def extract_invoice_info_with_openai(email_body):
+    payload = chat_completion_json(
+        system_prompt=(
+            "Extract structured invoice rows from email text. "
+            "Return a JSON object with one key, 'invoices', whose value is an array of objects. "
+            "Each object must use exactly these keys: Description, Amount, JobNumber. "
+            "Only include rows that clearly represent invoiceable line items or fee invoices. "
+            "Preserve the description text, keep amount strings as they appear, and leave JobNumber empty when absent."
+        ),
+        user_prompt=f"Email body:\n{email_body}",
+        max_tokens=2500,
     )
-
-
-# Initialize the DSPy prediction module for extracting invoice info
-invoice_extractor = dspy.Predict(ExtractInvoiceInfo)
-
-
-
-
-
-import re
+    invoices = payload.get("invoices", [])
+    if not isinstance(invoices, list):
+        raise ValueError("OpenAI invoice extraction response did not contain a list of invoices.")
+    return invoices
 
 def format_job_number(job_number):
     """Format job numbers to ensure they have a hyphen between prefix and number."""
@@ -159,14 +148,23 @@ def extract_job_number_from_description(description):
             clean_desc = re.sub(pattern, "", clean_desc, flags=re.IGNORECASE)
             break
     
-    # Also check for job number in parentheses
+    # Check for job number in parentheses (with or without "JOB:" prefix)
+    # This handles formats like "(TTC-100)" at the end of the description
     if not job_number:
-        # Look for patterns like "(JOB: TTC-380)" or "(Job #123)"
+        # First try job number with JOB prefix in parentheses
         parens_match = re.search(r"\(\s*(?:JOB|Job|job)\s*[:;#]?\s*([A-Za-z]{0,4}[-\s]*\d{2,4})\s*\)", clean_desc, re.IGNORECASE)
         if parens_match:
             job_number = parens_match.group(1)
             # Remove the entire parenthesized section
             clean_desc = re.sub(r"\(\s*(?:JOB|Job|job).*?\)", "", clean_desc, flags=re.IGNORECASE)
+        
+        # Then try to find standalone job number in parentheses (common pattern at the end)
+        else:
+            parens_job_match = re.search(r"\(\s*([A-Za-z]{2,4}[-\s]*\d{2,4})\s*\)", clean_desc, re.IGNORECASE)
+            if parens_job_match:
+                job_number = parens_job_match.group(1)
+                # Remove the entire parenthesized section
+                clean_desc = re.sub(r"\(\s*[A-Za-z]{2,4}[-\s]*\d{2,4}\s*\)", "", clean_desc, flags=re.IGNORECASE)
     
     # Also check for standalone "TTC-123" or similar patterns again
     if not job_number:
@@ -187,26 +185,44 @@ def clean_description_from_job_numbers(description):
     if not description:
         return ""
     
+    # First use the extract function to handle common patterns
     job_number, clean_desc = extract_job_number_from_description(description)
+    
+    # Additional cleanup for parenthesized job numbers at the end of the description
+    clean_desc = re.sub(r'\s*\([A-Za-z]{2,4}[-\s]*\d{2,4}\)\s*$', '', clean_desc)
+    
+    # Look for any standalone job number patterns that might have been missed
+    clean_desc = re.sub(r'\s*[A-Za-z]{2,4}[-\s]*\d{2,4}\s*$', '', clean_desc)
+    
+    # Final cleanup of whitespace
+    clean_desc = clean_desc.strip()
+    
     return clean_desc
+
+
+
+
+
 
 @performance_logger(output_dir='logs/performance')
 def extract_structured_data_from_email(email_body):
     """
-    Use DSPy to extract invoice information from the email body (description, amount, job_number).
-    No duplicate checking is done; we simply return all extracted lines.
+    Use OpenAI chat completions to extract invoice information from the email body.
+    Ensure job numbers are extracted and stored separately, and descriptions are clean.
     """
     try:
-        # Use DSPy to extract invoice information
-        response = invoice_extractor(text=email_body)
-
-        # Extract the list of invoices from the DSPy response
-        structured_data = response.invoices
+        structured_data = extract_invoice_info_with_openai(email_body)
 
         # Process each invoice one by one to handle job number extraction and description cleaning
         extracted_data = []
         for invoice in structured_data:
             description = invoice.get("Description", "").upper()
+            # Remove TTC numbers from description right after extraction
+            description = re.sub(r'\s*\([A-Za-z]{2,4}[-\s]*\d{2,4}\)\s*', ' ', description, flags=re.IGNORECASE)
+            description = re.sub(r'\s*[A-Za-z]{2,4}[-\s]*\d{2,4}\s*$', '', description, flags=re.IGNORECASE)
+            description = re.sub(r'\b[A-Za-z]{2,4}[-\s]*\d{2,4}\b', '', description, flags=re.IGNORECASE)
+            description = re.sub(r'\s+', ' ', description).strip()
+            
             amount = str(invoice.get("Amount", "")).replace('$', '').replace(',', '')
             job_number = invoice.get("JobNumber", "")
             
@@ -242,7 +258,7 @@ def extract_structured_data_from_email(email_body):
 
         return extracted_data
     except Exception as e:
-        logging.error(f"Error during DSPy extraction: {e}")
+        logging.error(f"Error during OpenAI invoice extraction: {e}")
         return None
 
 
@@ -298,7 +314,7 @@ def process_selected_eml_file(eml_file_path):
         logging.error("No plain text content found in the email.")
         return
 
-    # Use DSPy to extract structured invoice data from the email content
+    # Use OpenAI to extract structured invoice data from the email content
     extracted_data = extract_structured_data_from_email(email_body)
 
     # If structured data is found, insert it into the DB before processing PDFs
@@ -484,10 +500,23 @@ def handle_vendor_identification(pdf_file_path, vendor_map=None):
             print(f"Executing script for {base_name}, vendor is Capitol Hill Media...")
             split_large_amounts_and_format(docx_file_path)
             df_invoices = build_dataframe_from_capitol_media(docx_file_path)
-
-            invoices_list = list(
-            df_invoices[['Market', 'Amount']].itertuples(index=False, name=None)
-             )
+            
+            # Debug: Print dataframe info
+            print(f"DEBUG: Capitol Media DataFrame shape: {df_invoices.shape}")
+            print(f"DEBUG: Capitol Media DataFrame columns: {df_invoices.columns.tolist()}")
+            print(f"DEBUG: Capitol Media DataFrame contents:\n{df_invoices}")
+            
+            # Check if DataFrame is empty or has wrong columns
+            if df_invoices.empty:
+                print("WARNING: Capitol Media DataFrame is empty")
+                invoices_list = []
+            elif 'Market' not in df_invoices.columns or 'Amount' not in df_invoices.columns:
+                print(f"ERROR: Expected columns ['Market', 'Amount'] not found. Available columns: {df_invoices.columns.tolist()}")
+                invoices_list = []
+            else:
+                invoices_list = list(
+                df_invoices[['Market', 'Amount']].itertuples(index=False, name=None)
+                )
             
 
             '''
@@ -515,7 +544,7 @@ def handle_vendor_identification(pdf_file_path, vendor_map=None):
                 source="Capitol Media",
                 #docx_file_path=docx_file_path
             )
-            images = create_images_from_docx(docx_file_path, vendor_name, enhanced_invoices, page_to_market)
+            images = create_images_from_docx(docx_file_path, vendor_name, enhanced_invoices, None)
             #if images:
             #    DOCX_IMAGES_MAP[docx_file_path] = images
             #    logging.info(f"Created {len(images)} images for {docx_file_path}.")
@@ -672,6 +701,16 @@ def create_word_document():
         else:
             # Use whichever one is available (usually market)
             display_text = str(description) if description and description.strip() else str(market)
+        
+        # Remove TTC numbers from the display text before adding service period
+        # This handles cases where TTC numbers are still appearing in descriptions
+        # Very specific pattern for (TTC-350) format
+        display_text = re.sub(r'\s*\(TTC-\d+\)\s*', ' ', display_text, flags=re.IGNORECASE)
+        # General patterns for other TTC variations
+        display_text = re.sub(r'\s*\([A-Za-z]{2,4}[-\s]*\d{2,4}\)\s*', ' ', display_text, flags=re.IGNORECASE)
+        display_text = re.sub(r'\s*[A-Za-z]{2,4}[-\s]*\d{2,4}\s*$', '', display_text, flags=re.IGNORECASE)
+        display_text = re.sub(r'\b[A-Za-z]{2,4}[-\s]*\d{2,4}\b', '', display_text, flags=re.IGNORECASE)
+        display_text = re.sub(r'\s+', ' ', display_text).strip()
         
         # Add service period in parentheses if available
         if service_period and service_period.strip():
@@ -852,6 +891,13 @@ def create_word_document():
                 description = ""
                 job_number = ""
                 
+            # Clean TTC numbers from description right after unpacking from database
+            if description:
+                description = re.sub(r'\s*\([A-Za-z]{2,4}[-\s]*\d{2,4}\)\s*', ' ', str(description), flags=re.IGNORECASE)
+                description = re.sub(r'\s*[A-Za-z]{2,4}[-\s]*\d{2,4}\s*$', '', description, flags=re.IGNORECASE)
+                description = re.sub(r'\b[A-Za-z]{2,4}[-\s]*\d{2,4}\b', '', description, flags=re.IGNORECASE)
+                description = re.sub(r'\s+', ' ', description).strip()
+                
             log_msg = f"Adding invoice: {invoice_no}, market: {market}, amount: {amount}, service_period: {service_period}"
             if job_number:
                 log_msg += f", job: {job_number}"
@@ -991,6 +1037,10 @@ def create_word_document():
         logging.info(f"Formatted document also saved as {standard_output_path}")
     except Exception as e:
         logging.error(f"Error saving document: {str(e)}")
+    
+    # Final cleanup step for fee invoices - remove TTC numbers from Word document content
+
+    #clean_ttc_from_word_document(output_path)
     
     return output_path
 

@@ -3,10 +3,13 @@ import os
 import datetime
 import logging
 import pathlib
+import re
 
 
 
 BATCH_ID = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+DEFAULT_START_INVOICE_NUMBER = "112711"
+CURRENT_INVOICE_NUMBER = None
 
 
 def get_suffix_for_source(source):
@@ -68,8 +71,152 @@ def get_last_invoice_number(cursor):
     return result[0] if result else None
 
 
+def get_project_root():
+    return pathlib.Path(__file__).resolve().parent.parent
 
-def increment_invoice_number(last_inv_no, suffix, default_start="112535"):
+
+def get_final_output_directory():
+    project_root = get_project_root()
+    candidate_names = ["final invoice output", "final_invoice_output"]
+
+    for directory_name in candidate_names:
+        candidate = project_root / directory_name
+        if candidate.exists() and candidate.is_dir():
+            return candidate
+
+    # Default to the folder the current runtime uses.
+    return project_root / "final invoice output"
+
+
+def _extract_text_with_pypdf2(pdf_path):
+    from PyPDF2 import PdfReader
+
+    reader = PdfReader(str(pdf_path))
+    return "\n".join((page.extract_text() or "") for page in reader.pages)
+
+
+def _extract_text_with_fitz(pdf_path):
+    import fitz
+
+    document = fitz.open(str(pdf_path))
+    try:
+        return "\n".join(page.get_text() for page in document)
+    finally:
+        document.close()
+
+
+def extract_text_from_pdf(pdf_path):
+    extractors = (_extract_text_with_pypdf2, _extract_text_with_fitz)
+    last_error = None
+
+    for extractor in extractors:
+        try:
+            text = extractor(pdf_path)
+            if text:
+                return text
+        except Exception as exc:
+            last_error = exc
+
+    if last_error:
+        raise last_error
+
+    return ""
+
+
+def find_invoice_numbers_in_text(text):
+    if not text:
+        return []
+
+    pattern = re.compile(
+        r"INVOICE\s*NO\.?\s*[:#-]?\s*([0-9]{5,}(?:-[A-Z])?)",
+        re.IGNORECASE,
+    )
+    return pattern.findall(text)
+
+
+def _invoice_numeric_value(invoice_number):
+    digits = "".join(char for char in str(invoice_number) if char.isdigit())
+    return int(digits) if digits else -1
+
+
+def get_last_invoice_number_from_pdfs(output_dir=None):
+    output_directory = pathlib.Path(output_dir) if output_dir else get_final_output_directory()
+    if not output_directory.exists():
+        logging.warning("Final invoice output directory does not exist: %s", output_directory)
+        return None
+
+    pdf_files = sorted(
+        [
+            pdf_path for pdf_path in output_directory.iterdir()
+            if pdf_path.is_file() and pdf_path.suffix.lower() == ".pdf" and not pdf_path.name.startswith("~$")
+        ],
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    if not pdf_files:
+        logging.warning("No PDFs found in final invoice output directory: %s", output_directory)
+        return None
+
+    pdfs_by_date = {}
+    for pdf_path in pdf_files:
+        modified_date = datetime.datetime.fromtimestamp(pdf_path.stat().st_mtime).date()
+        pdfs_by_date.setdefault(modified_date, []).append(pdf_path)
+
+    for modified_date in sorted(pdfs_by_date.keys(), reverse=True):
+        invoice_numbers = []
+        for pdf_path in pdfs_by_date[modified_date]:
+            try:
+                text = extract_text_from_pdf(pdf_path)
+                matches = find_invoice_numbers_in_text(text)
+                if matches:
+                    logging.info(
+                        "Found %s invoice number(s) in %s from %s",
+                        len(matches),
+                        pdf_path.name,
+                        modified_date,
+                    )
+                    invoice_numbers.extend(matches)
+            except Exception as exc:
+                logging.warning("Unable to scan PDF %s for invoice numbers: %s", pdf_path, exc)
+
+        if invoice_numbers:
+            last_invoice_number = max(invoice_numbers, key=_invoice_numeric_value)
+            logging.info(
+                "Using invoice seed %s from newest PDF batch dated %s",
+                last_invoice_number,
+                modified_date,
+            )
+            return last_invoice_number
+
+    logging.warning("No invoice numbers found in scanned final output PDFs.")
+    return None
+
+
+def get_invoice_number_seed(cursor=None, source_preference=None):
+    global CURRENT_INVOICE_NUMBER
+
+    if CURRENT_INVOICE_NUMBER:
+        logging.info("Continuing invoice numbering from current runtime state: %s", CURRENT_INVOICE_NUMBER)
+        return CURRENT_INVOICE_NUMBER
+
+    source = (source_preference or os.getenv("INVOICE_NUMBER_SOURCE", "pdf")).strip().lower()
+
+    if source == "db":
+        if cursor is None:
+            logging.warning("Database invoice seed requested without a cursor.")
+            return None
+        return get_last_invoice_number(cursor)
+
+    if source == "auto":
+        return get_last_invoice_number_from_pdfs() or (
+            get_last_invoice_number(cursor) if cursor is not None else None
+        )
+
+    return get_last_invoice_number_from_pdfs()
+
+
+
+def increment_invoice_number(last_inv_no, suffix, default_start="112711"):
     """
     Increment the numeric portion of the last_invoice_no and then 
     append the given suffix. If last_invoice_no is None or parsing 
@@ -204,14 +351,36 @@ def is_fort_payne(market_desc):
     normalized = market_desc.lower().strip()
     return any(fp in normalized for fp in ["fort payne", "ft. payne", "ft payne"])
 
+def clean_ttc_from_description(description):
+    """Remove TTC numbers from descriptions while preserving the core description text."""
+    if not description or not isinstance(description, str):
+        return ""
+    
+    # Remove TTC numbers in parentheses (common pattern from SQLite database)
+    # Examples: "(TTC-350)", "(TTC 350)", "( TTC-350 )", etc.
+    cleaned = re.sub(r'\s*\([A-Za-z]{2,4}[-\s]*\d{2,4}\)\s*', ' ', description, flags=re.IGNORECASE)
+    
+    # Remove standalone TTC patterns at the end of descriptions
+    cleaned = re.sub(r'\s*[A-Za-z]{2,4}[-\s]*\d{2,4}\s*$', '', cleaned, flags=re.IGNORECASE)
+    
+    # Remove any TTC patterns that might be scattered throughout
+    cleaned = re.sub(r'\b[A-Za-z]{2,4}[-\s]*\d{2,4}\b', '', cleaned, flags=re.IGNORECASE)
+    
+    # Clean up multiple spaces and trim
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    
+    return cleaned
+
 def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path=None):
+    global CURRENT_INVOICE_NUMBER
+
     base_dir = pathlib.Path(__file__).resolve().parent
     db_path = base_dir.joinpath("invoice.db")
     conn = sqlite3.connect(str(db_path))
     cursor = conn.cursor()
     ensure_invoices_table_exists(cursor)
 
-    last_inv_no = get_last_invoice_number(cursor)
+    last_inv_no = get_invoice_number_seed(cursor)
     suffix = get_suffix_for_source(source)
     today_str = datetime.date.today().strftime("%Y-%m-%d")
     current_invoice_no = None
@@ -235,7 +404,7 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
         logging.info(f"Starting fresh invoice sequence from last invoice: {last_inv_no}")
         first_invoice = increment_invoice_number(last_inv_no, suffix)
     else:
-        first_invoice = f"112535{suffix}"  # Updated default starting point
+        first_invoice = f"{DEFAULT_START_INVOICE_NUMBER}{suffix}"
         logging.info(f"No previous invoices found, starting at default: {first_invoice}")
     
     # First, normalize all market descriptions and prepare for sorting
@@ -365,8 +534,17 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
             
         # Format the amount with dollar sign, comma separators, and two decimal places
         # Strip any existing dollar sign and commas before converting to float
-        clean_amt = str(amt).replace('$', '').replace(',', '')
-        formatted_amount = f"${float(clean_amt):,.2f}"
+        clean_amt = str(amt).replace('$', '').replace(',', '').strip()
+        
+        # Handle empty or invalid amounts
+        try:
+            if clean_amt == '' or clean_amt.lower() == 'none' or clean_amt.lower() == 'null':
+                formatted_amount = "$0.00"
+            else:
+                formatted_amount = f"${float(clean_amt):,.2f}"
+        except (ValueError, TypeError):
+            logging.warning(f"Could not convert amount '{amt}' to float, using $0.00")
+            formatted_amount = "$0.00"
             
         # Add to our enhanced invoices list with service period and description
         # This ensures each market+service_period combination gets its own unique invoice number in image filenames
@@ -430,6 +608,16 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
                 # Check if the third element might be a job number
                 potential_job = item[2] if item[2] is not None else ""
                 
+                # Handle pandas NaN or float values that might come from dataframes
+                if isinstance(potential_job, float):
+                    import math
+                    if math.isnan(potential_job):
+                        potential_job = ""
+                    else:
+                        potential_job = str(potential_job)
+                elif not isinstance(potential_job, str):
+                    potential_job = str(potential_job) if potential_job is not None else ""
+                
                 # Match market name (normalized_desc) with item's description (item[0])
                 # Use a more flexible match to handle minor differences in whitespace/case
                 item_desc = str(item[0]).strip().upper() if item[0] is not None else ""
@@ -465,12 +653,25 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
                 job_number = potential_job
                 logging.info(f"Extracted job number '{job_number}' from description")
                 
-                # Clean the description - remove the job number portion
-                description = re.sub(r"\b[A-Za-z]{2,4}[-\s]*\d{2,4}\b", "", description, flags=re.IGNORECASE)
-                description = re.sub(r"\s+", " ", description).strip()
+                # Clean the description - remove the job number portion using the dedicated function
+                description = clean_ttc_from_description(description)
                 logging.info(f"Cleaned description: '{description}'")
                 
         # Final formatting of job number (if any)
+        # Ensure job_number is a string and handle NaN/None cases
+        if isinstance(job_number, float):
+            import math
+            if math.isnan(job_number):
+                job_number = ""
+            else:
+                job_number = str(job_number)
+        elif job_number is None:
+            job_number = ""
+        elif not isinstance(job_number, str):
+            job_number = str(job_number)
+
+            
+        import re    
         if job_number and "-" not in job_number:
             # Format job numbers like "TTC 350" to "TTC-350"
             parts = re.match(r"([A-Za-z]+)\s*(\d+)", job_number)
@@ -478,13 +679,16 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
                 prefix, number = parts.groups()
                 job_number = f"{prefix}-{number}"
                     
+        # Apply final cleaning to description before saving to database
+        cleaned_description = clean_ttc_from_description(description)
+        
         # Insert into the database with job_number
         cursor.execute(
             """
             INSERT INTO invoices (batch_id, invoice_no, vendor, amount, date, market, service_period, description, docx_file_path, job_number)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (batch_id, current_invoice_no, source, formatted_amount, today_str, normalized_desc, service_period, description, docx_file_path, job_number)
+            (batch_id, current_invoice_no, source, formatted_amount, today_str, normalized_desc, service_period, cleaned_description, docx_file_path, job_number)
         )
     
     # Print the market-to-invoice mapping for debugging
@@ -506,6 +710,8 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
     # Commit changes and close connection
     conn.commit()
     conn.close()
+    if current_invoice_no:
+        CURRENT_INVOICE_NUMBER = current_invoice_no
     logging.info(f"Inserted {len(invoices)} invoice(s) from {source} into the database.")
     
     return enhanced_invoices
