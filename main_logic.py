@@ -4,6 +4,7 @@ import re
 import logging
 import sqlite3
 import datetime  # For generating batch IDs
+import fitz
 from dotenv import load_dotenv
 from PyQt5.QtWidgets import QApplication, QFileDialog, QInputDialog
 from email import policy
@@ -38,7 +39,8 @@ from vendor_invoice_logic.capitol_media_dataframe_1 import build_dataframe_from_
 from vendor_invoice_logic.capitol_media_rebuild import rebuild_capitol_media_table
 
 
-from image_generation.create_pdf_image import create_images_from_docx
+from image_generation.create_pdf_image import create_images_from_docx, resize_image
+from image_generation.shutterstock_crop import create_cropped_shutterstock_image
 
 from utils.pdf_utils import combine_vendor_pdfs
 from utils.openai_json import chat_completion_json
@@ -55,6 +57,8 @@ from utils.openai_json import chat_completion_json
 
 
 converter = PDFConverter()
+ASSIGNED_SPECIAL_VENDOR_INVOICES = {"Shutterstock": set()}
+BILLING_DATE_TEXT = None
 
 
 load_dotenv()
@@ -68,6 +72,78 @@ configure_logging(logs_dir='logs', console_level=logging.INFO, file_level=loggin
 
 # Initialize Qt Application for dialogs
 app = QApplication(sys.argv)
+
+JOB_NUMBER_PATTERN = r"[A-Za-z]{2,4}[-\s]*\d{2,4}(?:\s*-\s*[A-Za-z])?"
+
+
+def get_default_billing_date_text():
+    today = datetime.date.today()
+    return f"{today.strftime('%B').upper()} {today.day}, {today.year}"
+
+
+def format_billing_date_text(date_value):
+    return f"{date_value.strftime('%B').upper()} {date_value.day}, {date_value.year}"
+
+
+def extract_billing_date_from_email(email_body):
+    if not email_body:
+        return None
+
+    patterns = [
+        r"\bDATE\s*:\s*([A-Za-z]+ \d{1,2}, \d{4})\b",
+        r"\bdate\s+the\s+(?:following\s+)?billing\s+([A-Za-z]+ \d{1,2}, \d{4})\b",
+        r"\b([A-Za-z]+ \d{1,2}, \d{4})\b",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, email_body, re.IGNORECASE)
+        if not match:
+            continue
+
+        candidate = match.group(1).strip()
+        for fmt in ("%B %d, %Y", "%b %d, %Y"):
+            try:
+                parsed = datetime.datetime.strptime(candidate, fmt).date()
+                return format_billing_date_text(parsed)
+            except ValueError:
+                continue
+
+    return None
+
+
+def normalize_amount_value(amount):
+    raw = str(amount or "").strip().replace("$", "").replace(",", "")
+    if re.fullmatch(r"\d{1,2}\.\d{3}", raw):
+        raw = raw.replace(".", "")
+    return raw
+
+
+def extract_invoice_suffix_from_job_number(job_number):
+    match = re.search(
+        rf"\b([A-Za-z]{{2,4}})\s*-?\s*(\d{{2,4}})\s*-\s*([A-Za-z])\b",
+        str(job_number or ""),
+        re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    return f"-{match.group(3).upper()}"
+
+
+def infer_fee_invoice_suffix(description, raw_job_number=""):
+    combined_text = " ".join([str(description or ""), str(raw_job_number or "")]).upper()
+    if re.search(r"\bSTOCK\s+IMAGES?\b", combined_text):
+        return "-P"
+    return extract_invoice_suffix_from_job_number(raw_job_number)
+
+
+def clean_description_artifacts(text):
+    cleaned = str(text or "")
+    cleaned = re.sub(rf"\s*\({JOB_NUMBER_PATTERN}\)\s*", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(rf"\b{JOB_NUMBER_PATTERN}\b", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*[-–—]\s*[-–—]\s*", " ", cleaned)
+    cleaned = re.sub(r"\s+[-–—]\s*$", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -–—,;:")
+    return cleaned.strip()
 
 
 def extract_invoice_info_with_openai(email_body):
@@ -91,31 +167,18 @@ def format_job_number(job_number):
     """Format job numbers to ensure they have a hyphen between prefix and number."""
     if not job_number:
         return ""
-        
-    # If already has a hyphen, return as is
-    if "-" in job_number:
-        return job_number
-        
-    # Find the transition point between letters and numbers
-    prefix = ""
-    number = ""
-    for i, char in enumerate(job_number):
-        if char.isalpha() or char.isspace():
-            prefix += char
-        else:
-            number = job_number[i:]
-            break
-            
-    # Clean up prefix and number
-    prefix = prefix.strip()
-    number = number.strip()
-    
-    # If we found both parts, join with hyphen
-    if prefix and number:
-        return f"{prefix}-{number}"
-    
-    # Otherwise return original
-    return job_number
+
+    match = re.search(
+        rf"\b([A-Za-z]{{2,4}})\s*-?\s*(\d{{2,4}})(?:\s*-\s*([A-Za-z]))?\b",
+        str(job_number),
+        re.IGNORECASE,
+    )
+    if not match:
+        return str(job_number).strip()
+
+    prefix, number, suffix = match.groups()
+    normalized = f"{prefix.upper()}-{number}"
+    return normalized
 
 def extract_job_number_from_description(description):
     """Extract job number from description text."""
@@ -125,10 +188,10 @@ def extract_job_number_from_description(description):
     # Common job number patterns with capturing groups
     patterns = [
         # Format: "JOB: TTC-380" or "Job: TTC 380"
-        r"\b(?:JOB|Job|job)\s*[:;#]\s*([A-Za-z]{2,4}[-\s]*\d{2,4})\b",
+        rf"\b(?:JOB|Job|job)\s*[:;#]?\s*({JOB_NUMBER_PATTERN})\b",
         
         # Format: "TTC-380" or "TTC 380" standalone
-        r"\b([A-Za-z]{2,4}[-\s]*\d{2,4})\b",
+        rf"\b({JOB_NUMBER_PATTERN})\b",
         
         # Format: "Job #380" or simple numbers after job indicator
         r"\b(?:JOB|Job|job)\s*[:;#]\s*(\d{2,4})\b",
@@ -150,7 +213,7 @@ def extract_job_number_from_description(description):
     # This handles formats like "(TTC-100)" at the end of the description
     if not job_number:
         # First try job number with JOB prefix in parentheses
-        parens_match = re.search(r"\(\s*(?:JOB|Job|job)\s*[:;#]?\s*([A-Za-z]{0,4}[-\s]*\d{2,4})\s*\)", clean_desc, re.IGNORECASE)
+        parens_match = re.search(rf"\(\s*(?:JOB|Job|job)\s*[:;#]?\s*({JOB_NUMBER_PATTERN})\s*\)", clean_desc, re.IGNORECASE)
         if parens_match:
             job_number = parens_match.group(1)
             # Remove the entire parenthesized section
@@ -158,25 +221,22 @@ def extract_job_number_from_description(description):
         
         # Then try to find standalone job number in parentheses (common pattern at the end)
         else:
-            parens_job_match = re.search(r"\(\s*([A-Za-z]{2,4}[-\s]*\d{2,4})\s*\)", clean_desc, re.IGNORECASE)
+            parens_job_match = re.search(rf"\(\s*({JOB_NUMBER_PATTERN})\s*\)", clean_desc, re.IGNORECASE)
             if parens_job_match:
                 job_number = parens_job_match.group(1)
                 # Remove the entire parenthesized section
-                clean_desc = re.sub(r"\(\s*[A-Za-z]{2,4}[-\s]*\d{2,4}\s*\)", "", clean_desc, flags=re.IGNORECASE)
+                clean_desc = re.sub(rf"\(\s*{JOB_NUMBER_PATTERN}\s*\)", "", clean_desc, flags=re.IGNORECASE)
     
     # Also check for standalone "TTC-123" or similar patterns again
     if not job_number:
-        standalone_match = re.search(r"\b([A-Za-z]{2,4}[-\s]*\d{2,4})\b", clean_desc)
+        standalone_match = re.search(rf"\b({JOB_NUMBER_PATTERN})\b", clean_desc)
         if standalone_match:
             job_number = standalone_match.group(1)
             # Only remove if it's clearly a job number and not part of a regular word
-            if re.match(r"^[A-Za-z]{2,4}[-\s]*\d{2,4}$", job_number):
+            if re.match(rf"^{JOB_NUMBER_PATTERN}$", job_number, re.IGNORECASE):
                 clean_desc = re.sub(r"\b" + re.escape(job_number) + r"\b", "", clean_desc)
     
-    # Clean up multiple spaces and trim
-    clean_desc = re.sub(r'\s+', ' ', clean_desc).strip()
-    
-    return job_number, clean_desc
+    return format_job_number(job_number), clean_description_artifacts(clean_desc)
 
 def clean_description_from_job_numbers(description):
     """Remove any job number references from the description."""
@@ -187,15 +247,12 @@ def clean_description_from_job_numbers(description):
     job_number, clean_desc = extract_job_number_from_description(description)
     
     # Additional cleanup for parenthesized job numbers at the end of the description
-    clean_desc = re.sub(r'\s*\([A-Za-z]{2,4}[-\s]*\d{2,4}\)\s*$', '', clean_desc)
+    clean_desc = re.sub(rf'\s*\({JOB_NUMBER_PATTERN}\)\s*$', '', clean_desc, flags=re.IGNORECASE)
     
     # Look for any standalone job number patterns that might have been missed
-    clean_desc = re.sub(r'\s*[A-Za-z]{2,4}[-\s]*\d{2,4}\s*$', '', clean_desc)
+    clean_desc = re.sub(rf'\s*{JOB_NUMBER_PATTERN}\s*$', '', clean_desc, flags=re.IGNORECASE)
     
-    # Final cleanup of whitespace
-    clean_desc = clean_desc.strip()
-    
-    return clean_desc
+    return clean_description_artifacts(clean_desc)
 
 
 
@@ -214,15 +271,13 @@ def extract_structured_data_from_email(email_body):
         # Process each invoice one by one to handle job number extraction and description cleaning
         extracted_data = []
         for invoice in structured_data:
-            description = invoice.get("Description", "").upper()
-            # Remove TTC numbers from description right after extraction
-            description = re.sub(r'\s*\([A-Za-z]{2,4}[-\s]*\d{2,4}\)\s*', ' ', description, flags=re.IGNORECASE)
-            description = re.sub(r'\s*[A-Za-z]{2,4}[-\s]*\d{2,4}\s*$', '', description, flags=re.IGNORECASE)
-            description = re.sub(r'\b[A-Za-z]{2,4}[-\s]*\d{2,4}\b', '', description, flags=re.IGNORECASE)
-            description = re.sub(r'\s+', ' ', description).strip()
+            original_description = invoice.get("Description", "").upper()
+            description = clean_description_artifacts(original_description)
             
-            amount = str(invoice.get("Amount", "")).replace('$', '').replace(',', '')
-            job_number = invoice.get("JobNumber", "")
+            amount = normalize_amount_value(invoice.get("Amount", ""))
+            raw_job_number = invoice.get("JobNumber", "")
+            job_number = raw_job_number
+            invoice_suffix = infer_fee_invoice_suffix(original_description, raw_job_number)
             
             # Extract job number from description if not already provided
             extracted_job_number = ""
@@ -230,6 +285,7 @@ def extract_structured_data_from_email(email_body):
                 extracted_job_number, description = extract_job_number_from_description(description)
                 if extracted_job_number:
                     job_number = extracted_job_number
+                    invoice_suffix = invoice_suffix or infer_fee_invoice_suffix(original_description, extracted_job_number)
                     logging.info(f"Extracted job number '{job_number}' from description")
             else:
                 # If a job number was already provided, still clean the description
@@ -239,10 +295,16 @@ def extract_structured_data_from_email(email_body):
             job_number = format_job_number(job_number)
             
             # Add the processed invoice data
-            extracted_data.append((description, amount, job_number))
+            extracted_data.append((description, amount, job_number, invoice_suffix))
             
             # Log the extraction for debugging
-            logging.info(f"Extracted: Description='{description}', Amount='{amount}', JobNumber='{job_number}'")
+            logging.info(
+                "Extracted: Description='%s', Amount='%s', JobNumber='%s', InvoiceSuffix='%s'",
+                description,
+                amount,
+                job_number,
+                invoice_suffix,
+            )
             
         # Log summary of extraction
         logging.info(f"Extracted {len(extracted_data)} invoices from email body")
@@ -312,6 +374,11 @@ def process_selected_eml_file(eml_file_path):
         logging.error("No plain text content found in the email.")
         return
 
+    global BILLING_DATE_TEXT
+    extracted_billing_date = extract_billing_date_from_email(email_body)
+    BILLING_DATE_TEXT = extracted_billing_date or get_default_billing_date_text()
+    logging.info("Using billing date text: %s", BILLING_DATE_TEXT)
+
     # Use OpenAI to extract structured invoice data from the email content
     extracted_data = extract_structured_data_from_email(email_body)
 
@@ -325,6 +392,169 @@ def process_selected_eml_file(eml_file_path):
 
     else:
         logging.info("No structured data extracted from email body.")
+
+
+def _sanitize_filename_component(value):
+    return "".join(c for c in str(value or "") if c.isalnum() or c in ("-", "_")).lower()
+
+
+def fetch_fee_invoices_for_batch(batch_id):
+    db_path = os.path.join(os.getcwd(), "database", "invoice.db")
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT invoice_no, market, service_period, description, job_number
+            FROM invoices
+            WHERE batch_id = ? AND vendor = ?
+            ORDER BY id
+            """,
+            (batch_id, "FEE INVOICES"),
+        )
+        rows = cursor.fetchall()
+    finally:
+        conn.close()
+
+    return [
+        {
+            "invoice_no": row[0],
+            "market": row[1] or "",
+            "service_period": row[2] or "",
+            "description": row[3] or "",
+            "job_number": row[4] or "",
+        }
+        for row in rows
+    ]
+
+
+def select_shutterstock_fee_invoice(batch_id, pdf_file_path):
+    assigned_invoice_numbers = ASSIGNED_SPECIAL_VENDOR_INVOICES.setdefault("Shutterstock", set())
+    fee_rows = fetch_fee_invoices_for_batch(batch_id)
+    if not fee_rows:
+        logging.warning("No fee invoices found for batch %s while processing Shutterstock PDF.", batch_id)
+        return None
+
+    scored_candidates = []
+    pdf_name = os.path.basename(pdf_file_path).lower()
+    for row in fee_rows:
+        invoice_no = str(row["invoice_no"])
+        if invoice_no in assigned_invoice_numbers:
+            continue
+
+        searchable_text = " ".join(
+            [
+                str(row["market"]).lower(),
+                str(row["description"]).lower(),
+                str(row["job_number"]).lower(),
+                pdf_name,
+            ]
+        )
+        score = 0
+        if "shutterstock" in searchable_text:
+            score += 10
+        if "stock images" in searchable_text or "stock image" in searchable_text:
+            score += 8
+        if "image" in searchable_text:
+            score += 2
+
+        if score > 0:
+            scored_candidates.append((score, invoice_no, row))
+
+    if scored_candidates:
+        scored_candidates.sort(key=lambda item: (-item[0], item[1]))
+        selected_row = scored_candidates[0][2]
+        assigned_invoice_numbers.add(str(selected_row["invoice_no"]))
+        logging.info(
+            "Matched Shutterstock PDF %s to fee invoice %s (%s).",
+            os.path.basename(pdf_file_path),
+            selected_row["invoice_no"],
+            selected_row["market"],
+        )
+        return selected_row
+
+    unassigned_rows = [row for row in fee_rows if str(row["invoice_no"]) not in assigned_invoice_numbers]
+    if len(unassigned_rows) == 1:
+        selected_row = unassigned_rows[0]
+        assigned_invoice_numbers.add(str(selected_row["invoice_no"]))
+        logging.info(
+            "Falling back to the only unassigned fee invoice %s for Shutterstock PDF %s.",
+            selected_row["invoice_no"],
+            os.path.basename(pdf_file_path),
+        )
+        return selected_row
+
+    logging.warning(
+        "Could not uniquely match Shutterstock PDF %s to a fee invoice in batch %s.",
+        os.path.basename(pdf_file_path),
+        batch_id,
+    )
+    return None
+
+
+def create_shutterstock_image_for_fee_invoice(pdf_file_path, fee_invoice_row):
+    invoice_no = fee_invoice_row["invoice_no"]
+    market = fee_invoice_row["market"]
+    safe_market = _sanitize_filename_component(market) or "feeinvoice"
+    output_dir = os.path.join(os.getcwd(), "pdf images")
+    os.makedirs(output_dir, exist_ok=True)
+    output_image_path = os.path.join(
+        output_dir,
+        f"{invoice_no}_{safe_market}_feeinvoices_page_1.png",
+    )
+
+    try:
+        if os.path.exists(output_image_path):
+            os.remove(output_image_path)
+
+        create_cropped_shutterstock_image(pdf_file_path, output_image_path, page_index=0)
+        logging.info(
+            "Created cropped Shutterstock image %s for fee invoice %s (%s).",
+            output_image_path,
+            invoice_no,
+            market,
+        )
+        return output_image_path
+    except Exception as exc:
+        logging.warning(
+            "Shutterstock crop logic failed for fee invoice %s from %s; falling back to full-page render. Error: %s",
+            invoice_no,
+            pdf_file_path,
+            exc,
+        )
+
+    dpi = 600 if "shutterstock" in os.path.basename(pdf_file_path).lower() else 300
+    try:
+        pdf_document = fitz.open(pdf_file_path)
+        try:
+            if pdf_document.page_count == 0:
+                logging.error("Shutterstock PDF has no pages: %s", pdf_file_path)
+                return None
+
+            page = pdf_document.load_page(0)
+            pix = page.get_pixmap(matrix=fitz.Matrix(dpi / 72, dpi / 72))
+            if os.path.exists(output_image_path):
+                os.remove(output_image_path)
+            pix.save(output_image_path)
+        finally:
+            pdf_document.close()
+
+        resize_image(output_image_path)
+        logging.info(
+            "Created fallback Shutterstock image %s for fee invoice %s (%s).",
+            output_image_path,
+            invoice_no,
+            market,
+        )
+        return output_image_path
+    except Exception as exc:
+        logging.error(
+            "Failed to create Shutterstock image for fee invoice %s from %s: %s",
+            invoice_no,
+            pdf_file_path,
+            exc,
+        )
+        return None
             
 
 
@@ -401,16 +631,14 @@ def handle_vendor_identification(pdf_file_path, vendor_map=None):
 
     print(f"{base_name} --> {vendor_name}")
 
-    # Convert PDF to Word
-    docx_file_path = converter.convert_pdf_to_docx(pdf_file_path)
-
-    
-    page_to_market = read_page_markets(docx_file_path)
+    docx_file_path = None
 
     # Execute vendor-specific logic
     match vendor_name:
         case "Matrix Media":
             print(f"Executing script for {base_name}, vendor is Matrix Media...")
+            docx_file_path = converter.convert_pdf_to_docx(pdf_file_path)
+            page_to_market = read_page_markets(docx_file_path)
             # Apply the matrix media logic to update dollar amounts in the Word document
             analyze_word_document(docx_file_path)
             
@@ -496,6 +724,7 @@ def handle_vendor_identification(pdf_file_path, vendor_map=None):
 
         case "Capitol Hill Media":
             print(f"Executing script for {base_name}, vendor is Capitol Hill Media...")
+            docx_file_path = converter.convert_pdf_to_docx(pdf_file_path)
             df_invoices = build_dataframe_from_capitol_media(docx_file_path)
             
             # Debug: Print dataframe info
@@ -556,6 +785,16 @@ def handle_vendor_identification(pdf_file_path, vendor_map=None):
 
             #split_large_amounts_and_format()
             # call_capitol_hill_media_script(docx_file_path)  # your specialized logic
+        case "Shutterstock":
+            print(f"Executing script for {base_name}, vendor is Shutterstock...")
+            fee_invoice_row = select_shutterstock_fee_invoice(BATCH_ID, pdf_file_path)
+            if not fee_invoice_row:
+                logging.warning(
+                    "Skipping Shutterstock image creation because no matching fee invoice was found for %s.",
+                    base_name,
+                )
+            else:
+                create_shutterstock_image_for_fee_invoice(pdf_file_path, fee_invoice_row)
         case _:
             print(f"No specific handler for vendor: {vendor_name}")
 
@@ -668,6 +907,38 @@ def create_word_document():
     def remove_control_characters(text):
         return control_chars_re.sub('', text)
 
+    def display_invoice_number(invoice_no, market="", description="", job_number=""):
+        display_value = str(invoice_no or "").strip()
+        if not display_value:
+            return ""
+
+        suffix = infer_fee_invoice_suffix(" ".join([str(market or ""), str(description or "")]), str(job_number or ""))
+        if suffix and not display_value.upper().endswith(suffix):
+            return f"{display_value}{suffix}"
+        return display_value
+
+    def apply_bold_to_document(doc):
+        for paragraph in doc.paragraphs:
+            for run in paragraph.runs:
+                run.bold = True
+
+    def delete_paragraph(paragraph):
+        element = paragraph._element
+        parent = element.getparent()
+        if parent is not None:
+            parent.remove(element)
+
+    def trim_trailing_blank_pages(doc):
+        while doc.paragraphs:
+            paragraph = doc.paragraphs[-1]
+            has_text = bool(paragraph.text.strip())
+            has_drawing = bool(paragraph._element.xpath(".//*[local-name()='drawing']"))
+            if has_text or has_drawing:
+                break
+            delete_paragraph(paragraph)
+
+    billing_date_text = BILLING_DATE_TEXT or get_default_billing_date_text()
+
     def add_invoice_page(doc, invoice_no, market, amount, add_pagebreak=True, description="", service_period="", job_number=""):
         """Add an invoice page with optional page break"""
         header_lines = [
@@ -682,11 +953,16 @@ def create_word_document():
             header_run = header_paragraph.runs[0]
             header_run.font.size = Pt(11)
             header_run.font.name = 'Courier'
+            header_run.bold = True
             header_paragraph.paragraph_format.line_spacing = 1
 
         doc.add_paragraph('')
         page_content = invoice.invoice_string  # from your "invoice" module
-        page_content = page_content.replace('<<invoice>>', str(invoice_no))
+        page_content = page_content.replace(
+            '<<invoice>>',
+            display_invoice_number(invoice_no, market=market, description=description, job_number=job_number),
+        )
+        page_content = page_content.replace('<<date>>', billing_date_text)
         
         # Replace job number placeholder if available
         page_content = page_content.replace('<<job>>', str(job_number) if job_number else "")
@@ -707,12 +983,7 @@ def create_word_document():
         # Remove TTC numbers from the display text before adding service period
         # This handles cases where TTC numbers are still appearing in descriptions
         # Very specific pattern for (TTC-350) format
-        display_text = re.sub(r'\s*\(TTC-\d+\)\s*', ' ', display_text, flags=re.IGNORECASE)
-        # General patterns for other TTC variations
-        display_text = re.sub(r'\s*\([A-Za-z]{2,4}[-\s]*\d{2,4}\)\s*', ' ', display_text, flags=re.IGNORECASE)
-        display_text = re.sub(r'\s*[A-Za-z]{2,4}[-\s]*\d{2,4}\s*$', '', display_text, flags=re.IGNORECASE)
-        display_text = re.sub(r'\b[A-Za-z]{2,4}[-\s]*\d{2,4}\b', '', display_text, flags=re.IGNORECASE)
-        display_text = re.sub(r'\s+', ' ', display_text).strip()
+        display_text = clean_description_artifacts(display_text)
         
         # Add service period in parentheses if available
         if service_period and service_period.strip():
@@ -730,7 +1001,7 @@ def create_word_document():
             # Otherwise, format it properly
             try:
                 # Try to convert to float first (handles both string and numeric inputs)
-                amount_float = float(amount)
+                amount_float = float(normalize_amount_value(amount))
                 formatted_amount = f"${amount_float:.2f}"
             except (ValueError, TypeError):
                 # If conversion fails, use as is
@@ -752,6 +1023,7 @@ def create_word_document():
                 run = para.runs[0]
                 run.font.size = Pt(9)
                 run.font.name = 'Courier'
+                run.bold = True
                 para.paragraph_format.line_spacing = 1
 
         if add_pagebreak:
@@ -1030,6 +1302,8 @@ def create_word_document():
     # Save the assembled Word doc with the batch ID in the filename
     output_path = os.path.join(output_dir, f'final_invoice_output_{latest_batch}.docx')
     try:
+        apply_bold_to_document(new_doc)
+        trim_trailing_blank_pages(new_doc)
         new_doc.save(output_path)
         logging.info(f"Formatted document saved as {output_path}")
         

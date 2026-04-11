@@ -1,139 +1,149 @@
-import fitz  # PyMuPDF for PDF handling
+"""
+invoice_cropper.py
+------------------
+Pick a PDF or image, extract the invoice area, and save the result to an
+/images folder next to this script.
+
+Requires:
+    pip install pymupdf opencv-python pillow numpy
+"""
+
+import fitz                     # PyMuPDF
 import cv2
 import numpy as np
-from tkinter import Tk, filedialog, messagebox
 from PIL import Image
+from tkinter import Tk, filedialog, messagebox
+from pathlib import Path
 import os
 
-def crop_file():
-    # Hide Tkinter root window
-    root = Tk()
-    root.withdraw()
 
-    # Ask the user to select a file
+# ──────────────────────────────────────────────────────────────────────────────
+def crop_file() -> None:
+    root = Tk(); root.withdraw()
+
     file_path = filedialog.askopenfilename(
         title="Select a File (PDF or Image)",
-        filetypes=(("PDF and Image Files", "*.pdf;*.png;*.jpg;*.jpeg;*.tif;*.tiff"), ("All Files", "*.*"))
+        filetypes=[("PDF & Image Files",
+                    "*.pdf;*.png;*.jpg;*.jpeg;*.tif;*.tiff"),
+                   ("All Files", "*.*")]
     )
-
-    # Check if a file was selected
     if not file_path:
-        messagebox.showerror("Error", "No file selected. Exiting.")
+        messagebox.showerror("Error", "No file selected.")
         return
-
-    # Check if the selected file exists
     if not os.path.exists(file_path):
         messagebox.showerror("Error", f"File not found: {file_path}")
         return
 
     try:
-        # Determine the file type and process accordingly
-        if file_path.lower().endswith(".pdf"):
-            # Process PDF file
+        ext = Path(file_path).suffix.lower()
+        if ext == ".pdf":
             process_pdf(file_path)
-        elif file_path.lower().endswith(('.png', '.jpg', '.jpeg', '.tif', '.tiff')):
-            # Process image file
+        elif ext in {".png", ".jpg", ".jpeg", ".tif", ".tiff"}:
             process_image(file_path)
         else:
-            messagebox.showerror("Error", "Unsupported file type. Please select a PDF or image file.")
+            messagebox.showerror("Error", "Unsupported file type.")
             return
 
-        messagebox.showinfo("Success", "Cropped image(s) saved in the same directory as the original file.")
-
+        messagebox.showinfo("Done", "Cropped image(s) saved in the /images folder.")
     except Exception as e:
-        messagebox.showerror("Error", f"An error occurred: {str(e)}")
-        return
+        messagebox.showerror("Error", f"An error occurred:\n{e}")
 
-def process_pdf(file_path):
-    """Process a PDF file by converting pages to images and cropping them."""
-    pdf_document = fitz.open(file_path)
 
-    # Define the output directory and ensure it exists
-    output_dir = os.path.join(os.path.dirname(__file__), "images")
-    os.makedirs(output_dir, exist_ok=True)
+# ──────────────────────────────────────────────────────────────────────────────
+def process_pdf(file_path: str) -> None:
+    pdf        = fitz.open(file_path)
+    script_dir = Path(__file__).resolve().parent
+    out_dir    = script_dir / "images"
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    for page_num in range(len(pdf_document)):
-        page = pdf_document[page_num]
+    mat = fitz.Matrix(300 / 72, 300 / 72)            # ≈300 dpi
+    for i, page in enumerate(pdf, start=1):
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        w, h = pix.width, pix.height
+        img  = Image.frombytes("RGB", (w, h), pix.samples)
+        bgr  = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+        crop = crop_image(bgr)
 
-        # Render page as an image
-        pix = page.get_pixmap()
-        image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        cv2.imwrite(str(out_dir / f"invoice_{i}.png"), crop)
 
-        # Convert to numpy array for OpenCV (ensure proper format)
-        image_np = np.array(image)
 
-        # Crop the image
-        cropped_image = crop_image(image_np)
+def create_cropped_shutterstock_image(pdf_path: str, output_path: str, page_index: int = 0) -> str:
+    """
+    Render a PDF page, crop it using the Shutterstock invoice crop logic,
+    upscale it for Word insertion, and save to the requested output path.
+    """
+    pdf = fitz.open(pdf_path)
+    try:
+        if pdf.page_count == 0:
+            raise ValueError(f"PDF has no pages: {pdf_path}")
+        if page_index < 0 or page_index >= pdf.page_count:
+            raise IndexError(f"Requested page_index {page_index} is out of range for {pdf_path}")
 
-        # Save the cropped image in the "images" directory
-        output_path = os.path.join(
-            output_dir, 
-            f"shutterstock_cropped_page_{page_num + 1}.png"
-        )
-        # Convert cropped image back to RGB before saving
-        cropped_image_rgb = cv2.cvtColor(cropped_image, cv2.COLOR_BGR2RGB)
-        cv2.imwrite(output_path, cropped_image_rgb)
+        page = pdf.load_page(page_index)
+        mat = fitz.Matrix(300 / 72, 300 / 72)
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        image = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        bgr = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+        crop = crop_image(bgr)
+        sharp = upscale(crop, factor=6)
 
-def process_image(file_path):
-    """Process a single image file for cropping."""
-    # Define the output directory and ensure it exists
-    output_dir = os.path.join(os.path.dirname(__file__), "images")
-    os.makedirs(output_dir, exist_ok=True)
+        output_file = Path(output_path)
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(output_file), sharp)
+        return str(output_file)
+    finally:
+        pdf.close()
 
-    # Open the image file
-    image = Image.open(file_path)
-    image_np = np.array(image)
 
-    # Convert to BGR for OpenCV
-    if image_np.shape[-1] == 3:  # Check for RGB images
-        image_np = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+# ──────────────────────────────────────────────────────────────────────────────
+def process_image(file_path: str) -> None:
+    script_dir = Path(__file__).resolve().parent
+    out_dir    = script_dir / "images"
+    out_dir.mkdir(exist_ok=True)
 
-    # Crop the image
-    cropped_image = crop_image(image_np)
+    img   = cv2.imread(file_path)                    # BGR already
+    crop  = crop_image(img)
+    sharp = upscale(crop, factor=6)
 
-    # Save the cropped image in the "images" directory
-    output_path = os.path.join(
-        output_dir, 
-        f"cropped_{os.path.basename(file_path)}"
-    )
-    # Convert cropped image back to RGB before saving
-    cropped_image_rgb = cv2.cvtColor(cropped_image, cv2.COLOR_BGR2RGB)
-    cv2.imwrite(output_path, cropped_image_rgb)
+    cv2.imwrite(str(out_dir / f"cropped_{Path(file_path).name}"), sharp)
 
-def crop_image(image_np):
-    """Crop the content of an image using contours."""
-    # Convert to grayscale if not already
-    if len(image_np.shape) == 2:
-        gray = image_np  # Already grayscale
-    else:
-        gray = cv2.cvtColor(image_np, cv2.COLOR_BGR2GRAY)
 
-    # Threshold the image to separate content from background
-    _, thresh = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
+# ──────────────────────────────────────────────────────────────────────────────
+def crop_image(img: np.ndarray, *,
+               bottom_cut_ratio: float = 0.15, pad: int = 20) -> np.ndarray:
+    """
+    Grab everything that isn't blank page, ignoring the bottom 15 % where the
+    red Print / Close buttons live.
+    """
+    gray  = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    gray  = cv2.GaussianBlur(gray, (5, 5), 0)
 
-    # Find contours
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # Otsu gives robust text/background split
+    _, thresh = cv2.threshold(gray, 0, 255,
+                              cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-    # Filter contours by size
-    filtered_contours = [cnt for cnt in contours if cv2.contourArea(cnt) > 1000]
+    h_total   = img.shape[0]
+    top_area  = thresh[: int(h_total * (1 - bottom_cut_ratio)), :]
 
-    # Merge all filtered contours into one bounding box
-    x_min, y_min, x_max, y_max = float('inf'), float('inf'), 0, 0
-    for cnt in filtered_contours:
-        x, y, w, h = cv2.boundingRect(cnt)
-        x_min = min(x_min, x)
-        y_min = min(y_min, y)
-        x_max = max(x_max, x + w)
-        y_max = max(y_max, y + h)
+    coords = cv2.findNonZero(top_area)               # all non-black pixels
+    if coords is None:
+        return img                                   # nothing found → keep page
 
-    # Crop the image to the bounding box
-    cropped_image = image_np[y_min:y_max, x_min:x_max]
-    return cropped_image
+    x, y, w, h = cv2.boundingRect(coords)
+    x0 = max(x - pad, 0)
+    y0 = max(y - pad, 0)
+    x1 = min(x + w + pad, img.shape[1])
+    y1 = min(y + h + pad, img.shape[0])
 
+    return img[y0:y1, x0:x1]
+
+
+def upscale(img: np.ndarray, *, factor: int = 6) -> np.ndarray:
+    """Enlarge for on-screen sharpness."""
+    return cv2.resize(img, None, fx=factor, fy=factor,
+                      interpolation=cv2.INTER_LANCZOS4)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     crop_file()
-
-
-
-
-

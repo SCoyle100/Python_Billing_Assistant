@@ -4,6 +4,7 @@ import datetime
 import logging
 import pathlib
 import re
+import math
 
 
 
@@ -16,11 +17,12 @@ def get_suffix_for_source(source):
     """
     Return the appropriate suffix depending on the source.
     """
-    if source in ["Matrix Media", "Capitol Media"]:
+    normalized_source = str(source or "").strip()
+    if normalized_source in ["Matrix Media", "Capitol Media"]:
         return "-M"
-    elif source in ["RSH", "Smart Post"]:
+    elif normalized_source in ["RSH", "Smart Post"]:
         return "-P"
-    elif source == "FEE INVOICE":
+    elif normalized_source in ["FEE INVOICE", "FEE INVOICES"]:
         return ""
     # Provide a default if you wish, or just return empty string:
     return ""
@@ -355,21 +357,59 @@ def clean_ttc_from_description(description):
     """Remove TTC numbers from descriptions while preserving the core description text."""
     if not description or not isinstance(description, str):
         return ""
+
+    job_pattern = r"[A-Za-z]{2,4}[-\s]*\d{2,4}(?:\s*-\s*[A-Za-z])?"
     
     # Remove TTC numbers in parentheses (common pattern from SQLite database)
     # Examples: "(TTC-350)", "(TTC 350)", "( TTC-350 )", etc.
-    cleaned = re.sub(r'\s*\([A-Za-z]{2,4}[-\s]*\d{2,4}\)\s*', ' ', description, flags=re.IGNORECASE)
+    cleaned = re.sub(rf'\s*\({job_pattern}\)\s*', ' ', description, flags=re.IGNORECASE)
     
     # Remove standalone TTC patterns at the end of descriptions
-    cleaned = re.sub(r'\s*[A-Za-z]{2,4}[-\s]*\d{2,4}\s*$', '', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(rf'\s*{job_pattern}\s*$', '', cleaned, flags=re.IGNORECASE)
     
     # Remove any TTC patterns that might be scattered throughout
-    cleaned = re.sub(r'\b[A-Za-z]{2,4}[-\s]*\d{2,4}\b', '', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(rf'\b{job_pattern}\b', ' ', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'\s*[-–—]\s*[-–—]\s*', ' ', cleaned)
+    cleaned = re.sub(r'\s+[-–—]\s*$', '', cleaned)
     
     # Clean up multiple spaces and trim
-    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip(" -–—,;:")
     
     return cleaned
+
+
+def is_fee_invoice_source(source):
+    return str(source or "").strip().upper() in {"FEE INVOICE", "FEE INVOICES"}
+
+
+def unpack_invoice_item(invoice_item, source):
+    """
+    Normalize incoming invoice tuples across fee email rows, Matrix rows, and Capitol rows.
+    Returns: (description_or_market, amount, service_period, description, explicit_job_number, explicit_invoice_suffix)
+    """
+    explicit_job_number = ""
+    explicit_invoice_suffix = ""
+
+    if len(invoice_item) == 2:
+        desc, amt = invoice_item
+        return desc, amt, "", "", "", ""
+
+    if len(invoice_item) >= 3:
+        if is_fee_invoice_source(source):
+            desc, amt, explicit_job_number = invoice_item[:3]
+            if len(invoice_item) >= 4:
+                explicit_invoice_suffix = invoice_item[3] or ""
+            return desc, amt, "", "", explicit_job_number, explicit_invoice_suffix
+
+        if len(invoice_item) == 3:
+            desc, amt, service_period = invoice_item
+            return desc, amt, service_period, "", "", ""
+
+        if len(invoice_item) >= 4:
+            desc, amt, service_period, description = invoice_item[:4]
+            return desc, amt, service_period, description, "", ""
+
+    raise ValueError(f"Unexpected invoice format: {invoice_item}")
 
 def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path=None):
     global CURRENT_INVOICE_NUMBER
@@ -381,7 +421,7 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
     ensure_invoices_table_exists(cursor)
 
     last_inv_no = get_invoice_number_seed(cursor)
-    suffix = get_suffix_for_source(source)
+    invoice_suffix = get_suffix_for_source(source)
     today_str = datetime.date.today().strftime("%Y-%m-%d")
     current_invoice_no = None
     enhanced_invoices = []
@@ -402,31 +442,19 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
     if invoices and last_inv_no:
         # Start a fresh sequence for this batch
         logging.info(f"Starting fresh invoice sequence from last invoice: {last_inv_no}")
-        first_invoice = increment_invoice_number(last_inv_no, suffix)
+        first_invoice = increment_invoice_number(last_inv_no, invoice_suffix)
     else:
-        first_invoice = f"{DEFAULT_START_INVOICE_NUMBER}{suffix}"
+        first_invoice = f"{DEFAULT_START_INVOICE_NUMBER}{invoice_suffix}"
         logging.info(f"No previous invoices found, starting at default: {first_invoice}")
     
     # First, normalize all market descriptions and prepare for sorting
     normalized_invoices = []
     for idx, invoice_item in enumerate(invoices):
-        # Handle different invoice structures
-        if len(invoice_item) == 2:
-            desc, amt = invoice_item
-            service_period = ""
-            description = ""
-        elif len(invoice_item) >= 3:
-            if len(invoice_item) == 3:
-                desc, amt, service_period = invoice_item
-                description = ""
-            elif len(invoice_item) >= 4:
-                desc, amt, service_period, description = invoice_item[:4]
-            else:
-                desc, amt = invoice_item[:2]
-                service_period = ""
-                description = ""
-        else:
-            # Skip unexpected formats
+        try:
+            desc, amt, service_period, description, explicit_job_number, explicit_invoice_suffix = unpack_invoice_item(
+                invoice_item, source
+            )
+        except ValueError:
             logging.error(f"Unexpected invoice format: {invoice_item}")
             continue
             
@@ -437,8 +465,10 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
             normalized_desc = desc.strip()
         
         # Add all available fields to the normalized invoice
-        if service_period or description:
-            normalized_invoices.append((normalized_desc, amt, service_period, description))
+        if service_period or description or explicit_job_number or explicit_invoice_suffix:
+            normalized_invoices.append(
+                (normalized_desc, amt, service_period, description, explicit_job_number, explicit_invoice_suffix)
+            )
         else:
             normalized_invoices.append((normalized_desc, amt))
     
@@ -471,24 +501,13 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
     
     # Process each invoice in the sorted order
     for idx, invoice_item in enumerate(sorted_invoices):
-        # Handle different invoice data structures (tuples of different lengths)
-        if len(invoice_item) == 2:
-            normalized_desc, amt = invoice_item
-            service_period = ""
-            description = ""
-        elif len(invoice_item) >= 3:
-            # Handle case with ServicePeriod and/or Description
-            if len(invoice_item) == 3:
-                normalized_desc, amt, service_period = invoice_item
-                description = ""
-            elif len(invoice_item) >= 4:
-                normalized_desc, amt, service_period, description = invoice_item[:4]
-            else:
-                normalized_desc, amt = invoice_item[:2]
-                service_period = ""
-                description = ""
-        else:
-            # Fallback for unexpected formats
+        explicit_job_number = ""
+        explicit_invoice_suffix = ""
+        try:
+            normalized_desc, amt, service_period, description, explicit_job_number, explicit_invoice_suffix = unpack_invoice_item(
+                invoice_item, source
+            )
+        except ValueError:
             logging.error(f"Unexpected invoice format: {invoice_item}")
             continue
         # Special handling for Fort Payne - always use the same invoice number
@@ -504,7 +523,7 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
                     current_invoice_no = first_invoice
                 else:
                     # Otherwise increment from the last invoice number we generated
-                    current_invoice_no = increment_invoice_number(current_invoice_no, suffix)
+                    current_invoice_no = increment_invoice_number(current_invoice_no, invoice_suffix)
                 
                 # Save the Fort Payne invoice number for future use
                 fort_payne_invoice = current_invoice_no
@@ -516,9 +535,19 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
                 current_invoice_no = first_invoice
             else:
                 # Otherwise increment from the last invoice number we generated
-                current_invoice_no = increment_invoice_number(current_invoice_no, suffix)
+                current_invoice_no = increment_invoice_number(current_invoice_no, invoice_suffix)
             
             logging.info(f"Created invoice number {current_invoice_no} for market: {normalized_desc}")
+
+        invoice_no_to_store = current_invoice_no
+        if explicit_invoice_suffix:
+            invoice_no_to_store = f"{current_invoice_no}{explicit_invoice_suffix}"
+            logging.info(
+                "Applied explicit invoice suffix '%s' to %s, resulting in %s",
+                explicit_invoice_suffix,
+                current_invoice_no,
+                invoice_no_to_store,
+            )
             
         # Create a composite key with market + service period for tracking
         # This ensures markets with the same name but different service periods are tracked separately
@@ -528,13 +557,15 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
             
         # Track invoices assigned to each market+service period combination (for debugging)
         if composite_key in market_invoice_map:
-            market_invoice_map[composite_key].append(current_invoice_no)
+            market_invoice_map[composite_key].append(invoice_no_to_store)
         else:
-            market_invoice_map[composite_key] = [current_invoice_no]
+            market_invoice_map[composite_key] = [invoice_no_to_store]
             
         # Format the amount with dollar sign, comma separators, and two decimal places
         # Strip any existing dollar sign and commas before converting to float
         clean_amt = str(amt).replace('$', '').replace(',', '').strip()
+        if re.fullmatch(r"\d{1,2}\.\d{3}", clean_amt):
+            clean_amt = clean_amt.replace(".", "")
         
         # Handle empty or invalid amounts
         try:
@@ -549,12 +580,12 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
         # Add to our enhanced invoices list with service period and description
         # This ensures each market+service_period combination gets its own unique invoice number in image filenames
         if service_period or description:
-            enhanced_invoices.append((normalized_desc, amt, current_invoice_no, service_period, description))
-            logging.info(f"Enhanced invoice with service period: Market='{normalized_desc}', Amount='{amt}', InvoiceNo='{current_invoice_no}', ServicePeriod='{service_period}', Description='{description}'")
+            enhanced_invoices.append((normalized_desc, amt, invoice_no_to_store, service_period, description))
+            logging.info(f"Enhanced invoice with service period: Market='{normalized_desc}', Amount='{amt}', InvoiceNo='{invoice_no_to_store}', ServicePeriod='{service_period}', Description='{description}'")
         else:
             #enhanced_invoices.append((normalized_desc, amt, current_invoice_no))
             #logging.info(f"Enhanced invoice without service period: Market='{normalized_desc}', Amount='{amt}', InvoiceNo='{current_invoice_no}'")
-            enhanced_invoices.append((normalized_desc, amt, current_invoice_no, "", ""))
+            enhanced_invoices.append((normalized_desc, amt, invoice_no_to_store, "", ""))
         
         # Get service_period and description if available in enhanced_invoices
         service_period = ""
@@ -599,7 +630,7 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
                             break
                     
         # Get job number if available (for data from email extraction)
-        job_number = ""
+        job_number = explicit_job_number if explicit_job_number else ""
         
         # Check if any of the invoice items in the original invoices list has a job number
         # Job number would be in the third position if present
@@ -610,7 +641,6 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
                 
                 # Handle pandas NaN or float values that might come from dataframes
                 if isinstance(potential_job, float):
-                    import math
                     if math.isnan(potential_job):
                         potential_job = ""
                     else:
@@ -640,16 +670,14 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
         # function, we can do a simple check for common patterns
         if not job_number and description:
             # Look for patterns like "TTC 350" or "TTC-350" in the description
-            import re
-            job_match = re.search(r"\b([A-Za-z]{2,4}[-\s]*\d{2,4})\b", description, re.IGNORECASE)
+            job_match = re.search(r"\b([A-Za-z]{2,4}[-\s]*\d{2,4}(?:\s*-\s*[A-Za-z])?)\b", description, re.IGNORECASE)
             if job_match:
                 potential_job = job_match.group(1)
                 # Make sure it has a hyphen
-                if "-" not in potential_job:
-                    parts = re.match(r"([A-Za-z]+)\s*(\d+)", potential_job)
-                    if parts:
-                        prefix, number = parts.groups()
-                        potential_job = f"{prefix}-{number}"
+                normalized_match = re.match(r"([A-Za-z]+)\s*-?\s*(\d+)(?:\s*-\s*([A-Za-z]))?", potential_job)
+                if normalized_match:
+                    prefix, number, job_suffix = normalized_match.groups()
+                    potential_job = f"{prefix}-{number}"
                 job_number = potential_job
                 logging.info(f"Extracted job number '{job_number}' from description")
                 
@@ -660,7 +688,6 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
         # Final formatting of job number (if any)
         # Ensure job_number is a string and handle NaN/None cases
         if isinstance(job_number, float):
-            import math
             if math.isnan(job_number):
                 job_number = ""
             else:
@@ -671,12 +698,10 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
             job_number = str(job_number)
 
             
-        import re    
-        if job_number and "-" not in job_number:
-            # Format job numbers like "TTC 350" to "TTC-350"
-            parts = re.match(r"([A-Za-z]+)\s*(\d+)", job_number)
+        if job_number:
+            parts = re.match(r"([A-Za-z]+)\s*-?\s*(\d+)(?:\s*-\s*([A-Za-z]))?", job_number)
             if parts:
-                prefix, number = parts.groups()
+                prefix, number, job_suffix = parts.groups()
                 job_number = f"{prefix}-{number}"
                     
         # Apply final cleaning to description before saving to database
@@ -688,14 +713,14 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
             INSERT INTO invoices (batch_id, invoice_no, vendor, amount, date, market, service_period, description, docx_file_path, job_number)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (batch_id, current_invoice_no, source, formatted_amount, today_str, normalized_desc, service_period, cleaned_description, docx_file_path, job_number)
+            (batch_id, invoice_no_to_store, source, formatted_amount, today_str, normalized_desc, service_period, cleaned_description, docx_file_path, job_number)
         )
     
     # Print the market-to-invoice mapping for debugging
     logging.info("=== MARKET TO INVOICE MAPPING ===")
-    for market, invoices in market_invoice_map.items():
-        if invoices:
-            logging.info(f"{market}: {', '.join(invoices)}")
+    for market, invoice_numbers in market_invoice_map.items():
+        if invoice_numbers:
+            logging.info(f"{market}: {', '.join(invoice_numbers)}")
         else:
             logging.info(f"{market}: No invoices")
     logging.info("=================================")
@@ -712,6 +737,6 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
     conn.close()
     if current_invoice_no:
         CURRENT_INVOICE_NUMBER = current_invoice_no
-    logging.info(f"Inserted {len(invoices)} invoice(s) from {source} into the database.")
+    logging.info(f"Inserted {len(sorted_invoices)} invoice(s) from {source} into the database.")
     
     return enhanced_invoices
