@@ -45,18 +45,17 @@ def _split_invoice_rows(invoice_rows):
 
         remaining = normalized_amount
         part_index = 0
-        while remaining > 0:
-            part_index += 1
-            part_amount = min(5000.0, remaining)
-            remaining -= part_amount
-
-            if normalized_amount > 5000.0:
-                description = f"{normalized_market} - PART {chr(64 + part_index)}"
-            else:
-                description = normalized_market
-
-            display_rows.append((description, _format_currency(part_amount)))
-            running_total += part_amount
+        if normalized_amount > 5000.0:
+            display_rows.append(([normalized_market], ""))
+            while remaining > 0:
+                part_index += 1
+                part_amount = min(5000.0, remaining)
+                remaining -= part_amount
+                display_rows.append(([f"    - PART {chr(64 + part_index)}"], _format_currency(part_amount)))
+                running_total += part_amount
+        else:
+            display_rows.append(([normalized_market], _format_currency(normalized_amount)))
+            running_total += normalized_amount
 
     return display_rows, running_total
 
@@ -151,6 +150,60 @@ def _extract_intro_lines(detail_row):
     return intro_lines
 
 
+def _extract_adjusted_amounts(detail_row):
+    """
+    Read the original amount paragraph sequence and fold negative discount rows
+    back into the preceding positive amount.
+    """
+    amount_lines = _paragraph_lines(detail_row.cells[-1])
+    adjusted_amounts = []
+
+    for line in amount_lines:
+        amount = _parse_amount(line)
+        if amount > 0:
+            adjusted_amounts.append(amount)
+        elif amount < 0 and adjusted_amounts:
+            adjusted_amounts[-1] += abs(amount)
+
+    return adjusted_amounts
+
+
+def _extract_adjusted_amounts_from_row(row):
+    amount_lines = _paragraph_lines(row.cells[-1])
+    adjusted_amounts = []
+
+    for line in amount_lines:
+        amount = _parse_amount(line)
+        if amount > 0:
+            adjusted_amounts.append(amount)
+        elif amount < 0 and adjusted_amounts:
+            adjusted_amounts[-1] += abs(amount)
+
+    return adjusted_amounts
+
+
+def _apply_adjusted_amounts(invoice_rows, adjusted_amounts):
+    if not adjusted_amounts:
+        return invoice_rows
+
+    updated_rows = []
+    for index, (market, amount) in enumerate(invoice_rows):
+        if index < len(adjusted_amounts):
+            updated_rows.append((market, adjusted_amounts[index]))
+        else:
+            updated_rows.append((market, amount))
+
+    if len(adjusted_amounts) != len(invoice_rows):
+        logging.warning(
+            "Capitol adjusted amount count (%s) did not match extracted invoice row count (%s). "
+            "Applied adjusted amounts by order where possible.",
+            len(adjusted_amounts),
+            len(invoice_rows),
+        )
+
+    return updated_rows
+
+
 def _clear_cell(cell):
     tc = cell._tc
     for child in list(tc):
@@ -236,6 +289,7 @@ def rebuild_capitol_media_table(docx_path, invoice_rows):
     original_detail_row = table.rows[detail_row_index]
     original_total_row = table.rows[total_row_index]
     preserved_intro_lines = _extract_intro_lines(original_detail_row)
+    adjusted_amounts = _extract_adjusted_amounts_from_row(original_detail_row)
 
     detail_template = deepcopy(original_detail_row._tr)
     total_template = deepcopy(original_total_row._tr)
@@ -243,14 +297,16 @@ def rebuild_capitol_media_table(docx_path, invoice_rows):
     for row_index in range(total_row_index, detail_row_index - 1, -1):
         table._tbl.remove(table.rows[row_index]._tr)
 
-    detail_rows, running_total = _split_invoice_rows(invoice_rows)
+    adjusted_invoice_rows = _apply_adjusted_amounts(invoice_rows, adjusted_amounts)
+
+    detail_rows, running_total = _split_invoice_rows(adjusted_invoice_rows)
     row_specs = []
 
     if preserved_intro_lines:
         row_specs.append((preserved_intro_lines, ""))
 
-    for description, amount in detail_rows:
-        row_specs.append(([description], amount))
+    for description_lines, amount in detail_rows:
+        row_specs.append((description_lines, amount))
 
     row_templates = [deepcopy(detail_template) for _ in row_specs]
     row_templates.append(deepcopy(total_template))
@@ -271,13 +327,12 @@ def rebuild_capitol_media_table(docx_path, invoice_rows):
     _set_row_min_height(total_row, 420)
     _add_lines_to_cell(
         total_row.cells[0],
-        ["Total"],
+        [""],
         alignment=WD_ALIGN_PARAGRAPH.LEFT,
-        bold=True,
     )
     _add_lines_to_cell(
         total_row.cells[-1],
-        [_format_currency(running_total)],
+        [f"Total {_format_currency(running_total)}"],
         alignment=WD_ALIGN_PARAGRAPH.RIGHT,
         bold=True,
     )
