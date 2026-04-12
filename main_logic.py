@@ -15,31 +15,17 @@ from docx.shared import Inches
 from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
 import invoice  # Ensure your invoice template module is imported
 
-from pdf_to_docx_ import PDFConverter
-
 from database.database_functions import (
     save_invoices_to_db,
     BATCH_ID,
 
 )
+from document_backends import build_default_document_services
 
 from vendor_invoice_logic.vendor_id import identify_vendors_from_pdfs_in_directory
 
-from vendor_invoice_logic.matrix_media_logic import analyze_word_document
 
-from vendor_invoice_logic.matrix_media_dataframe import (
-    build_dataframe_from_word_document,
-    
-    
-)
-
-from vendor_invoice_logic.matrix_media_market_map import read_page_markets
-
-from vendor_invoice_logic.capitol_media_dataframe_1 import build_dataframe_from_capitol_media
-from vendor_invoice_logic.capitol_media_rebuild import rebuild_capitol_media_table
-
-
-from image_generation.create_pdf_image import create_images_from_docx, resize_image
+from image_generation.create_pdf_image import resize_image
 from image_generation.shutterstock_crop import create_cropped_shutterstock_image
 
 from utils.pdf_utils import combine_vendor_pdfs
@@ -52,11 +38,7 @@ from utils.openai_json import chat_completion_json
 # Global batch_id so that PDF and Email inserts share the same batch id within the same run.
 #BATCH_ID = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
-
-
-
-
-converter = PDFConverter()
+document_services = build_default_document_services()
 ASSIGNED_SPECIAL_VENDOR_INVOICES = {"Shutterstock": set()}
 BILLING_DATE_TEXT = None
 
@@ -637,13 +619,16 @@ def handle_vendor_identification(pdf_file_path, vendor_map=None):
     match vendor_name:
         case "Matrix Media":
             print(f"Executing script for {base_name}, vendor is Matrix Media...")
-            docx_file_path = converter.convert_pdf_to_docx(pdf_file_path)
-            page_to_market = read_page_markets(docx_file_path)
+            docx_file_path = document_services.pdf_to_docx.convert_pdf_to_docx(pdf_file_path)
+            page_to_market = document_services.matrix.page_mapper.read_page_markets(
+                docx_file_path,
+                source_pdf_path=pdf_file_path,
+            )
             # Apply the matrix media logic to update dollar amounts in the Word document
-            analyze_word_document(docx_file_path)
+            document_services.matrix.document_rewriter.rewrite(docx_file_path)
             
             # Extract invoice data into a DataFrame
-            df_invoices = build_dataframe_from_word_document(docx_file_path)
+            df_invoices = document_services.matrix.dataframe_builder.build(docx_file_path)
             
             # Debug print to verify DataFrame correctly identifies all markets
             print("DEBUG: DataFrame contents before converting to invoice list:")
@@ -714,7 +699,7 @@ def handle_vendor_identification(pdf_file_path, vendor_map=None):
                 print(f"Page {page}: market='{market}', service_period='{service_period}'")
 
             # Create images from the Word document
-            images = create_images_from_docx(
+            images = document_services.rendering.docx_to_images.generate(
                 docx_file_path, 
                 "Matrix Media", 
                 invoice_data=enhanced_invoices, 
@@ -724,8 +709,8 @@ def handle_vendor_identification(pdf_file_path, vendor_map=None):
 
         case "Capitol Hill Media":
             print(f"Executing script for {base_name}, vendor is Capitol Hill Media...")
-            docx_file_path = converter.convert_pdf_to_docx(pdf_file_path)
-            df_invoices = build_dataframe_from_capitol_media(docx_file_path)
+            docx_file_path = document_services.pdf_to_docx.convert_pdf_to_docx(pdf_file_path)
+            df_invoices = document_services.capitol.dataframe_builder.build(docx_file_path)
             
             # Debug: Print dataframe info
             print(f"DEBUG: Capitol Media DataFrame shape: {df_invoices.shape}")
@@ -745,7 +730,7 @@ def handle_vendor_identification(pdf_file_path, vendor_map=None):
                 )
 
             if invoices_list:
-                rebuild_capitol_media_table(docx_file_path, invoices_list)
+                document_services.capitol.table_rebuilder.rebuild(docx_file_path, invoices_list)
             else:
                 logging.warning("Skipping Capitol Media table rebuild because no invoice rows were extracted.")
             
@@ -775,7 +760,12 @@ def handle_vendor_identification(pdf_file_path, vendor_map=None):
                 source="Capitol Media",
                 #docx_file_path=docx_file_path
             )
-            images = create_images_from_docx(docx_file_path, vendor_name, enhanced_invoices, None)
+            images = document_services.rendering.docx_to_images.generate(
+                docx_file_path,
+                vendor_name,
+                enhanced_invoices,
+                None,
+            )
             #if images:
             #    DOCX_IMAGES_MAP[docx_file_path] = images
             #    logging.info(f"Created {len(images)} images for {docx_file_path}.")

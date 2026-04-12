@@ -1,28 +1,14 @@
 import os
 import logging
-from xml.etree.ElementTree import QName
 from dotenv import load_dotenv
-import sys
-import docx
-from docx.shared import Pt
-from docx.oxml import OxmlElement
-from docx.oxml.ns import qn
-from datetime import datetime
 from adobe.pdfservices.operation.auth.service_principal_credentials import ServicePrincipalCredentials
 from adobe.pdfservices.operation.exception.exceptions import ServiceApiException, ServiceUsageException, SdkException
-from adobe.pdfservices.operation.io.cloud_asset import CloudAsset
-from adobe.pdfservices.operation.io.stream_asset import StreamAsset
 from adobe.pdfservices.operation.pdf_services import PDFServices
 from adobe.pdfservices.operation.pdf_services_media_type import PDFServicesMediaType
 from adobe.pdfservices.operation.pdfjobs.jobs.export_pdf_job import ExportPDFJob
 from adobe.pdfservices.operation.pdfjobs.params.export_pdf.export_pdf_params import ExportPDFParams
 from adobe.pdfservices.operation.pdfjobs.params.export_pdf.export_pdf_target_format import ExportPDFTargetFormat
 from adobe.pdfservices.operation.pdfjobs.result.export_pdf_result import ExportPDFResult
-from adobe.pdfservices.operation.pdfjobs.jobs.create_pdf_job import CreatePDFJob
-from adobe.pdfservices.operation.pdfjobs.result.create_pdf_result import CreatePDFResult
-from openai import OpenAI
-from PyQt5.QtWidgets import QFileDialog, QApplication, QMessageBox
-import win32com.client as win32
 
 # Import utils
 try:

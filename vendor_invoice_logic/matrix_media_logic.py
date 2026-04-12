@@ -33,28 +33,69 @@ def format_dollar_amount(value):
     return formatted
 
 
+def calculate_updated_amount(original_amount, is_oneonta=False):
+    parsed_value = parse_dollar_amount(original_amount)
+    if is_oneonta:
+        multiplied_value = parsed_value * 1.3177
+    else:
+        multiplied_value = parsed_value / 0.85
+
+    if multiplied_value != int(multiplied_value):
+        multiplied_value = int(multiplied_value)
+
+    return format_dollar_amount(multiplied_value)
+
+
+def record_textbox_replacement(replacements, ambiguous_amounts, original_amount, updated_amount):
+    existing_value = replacements.get(original_amount)
+    if existing_value is None:
+        replacements[original_amount] = updated_amount
+        return
+
+    if existing_value != updated_amount:
+        ambiguous_amounts.add(original_amount)
+
 
 
 
 def analyze_word_document(file_path):
     # Initialize Word application
-    word = win32com.client.Dispatch("Word.Application")
-    word.Visible = False  # Change to True for debugging
+    try:
+        word = win32com.client.Dispatch("Word.Application")
+        word.Visible = False  # Change to True for debugging
+        print(f"Word application initialized. Type: {type(word)}")
+        print(f"Word attributes: {dir(word)[:10]}...")  # Show first 10 attributes
+    except Exception as e:
+        print(f"Error initializing Word application: {e}")
+        raise
 
     # Regex pattern to match dollar amounts, e.g., $999.00 up to $99,999.00
     dollar_amount_pattern = re.compile(r"\$(\d{1,3}(?:,\d{3})*\.\d{2})")
 
-    # Open the document
-    doc = word.Documents.Open(file_path)
-    page_to_market = {}
+    # Open the document with proper error handling
+    try:
+        doc = word.Documents.Open(file_path)
+        print(f"Document opened successfully. Type: {type(doc)}")
+        #print(f"Document attributes: {dir(doc)[:10]}...")  # Show first 10 attributes
+    except Exception as e:
+        print(f"Error opening document: {e}")
+        word.Quit()
+        raise
+    
+    textbox_replacements = {}
+    ambiguous_textbox_amounts = set()
 
 
     try:
         # 1. Build a mapping of page_number -> table object
         page_tables = {}
-        for table in doc.Tables:
-            page_num = table.Range.Information(wdActiveEndPageNumber)
-            page_tables[page_num] = table
+        try:
+            for table in doc.Tables:
+                page_num = table.Range.Information(wdActiveEndPageNumber)
+                page_tables[page_num] = table
+        except Exception as e:
+            print(f"Error accessing document tables: {e}")
+            raise
 
         # 2. Build a mapping of page_number -> list of shapes
         page_shapes = {}
@@ -97,8 +138,6 @@ def analyze_word_document(file_path):
 
                 for match in matches:
                     original_amount = match.group(0)
-                    parsed_value = parse_dollar_amount(original_amount)
-                    
                     # Get market name from current row
                     market_cell_index = None
                     for col_idx in range(1, num_cols + 1):
@@ -108,17 +147,20 @@ def analyze_word_document(file_path):
                             break
                     
                     # Apply special margin for Oneonta
-                    if market_cell_index and "Oneonta" in table.Cell(row_idx, market_cell_index).Range.Text.strip():
-                        # 24.11% margin for Oneonta (multiplication by 1.3177)
-                        multiplied_value = parsed_value * 1.3177
-                    else:
-                        # Standard 15% margin for other markets
-                        multiplied_value = parsed_value / 0.85
-                        
-                    # Round down to nearest dollar only when there are cents (non-zero decimal part)
-                    if multiplied_value != int(multiplied_value):
-                        multiplied_value = int(multiplied_value)
-                    updated_amount = format_dollar_amount(multiplied_value)
+                    is_oneonta_row = bool(
+                        market_cell_index
+                        and "Oneonta" in table.Cell(row_idx, market_cell_index).Range.Text.strip()
+                    )
+                    updated_amount = calculate_updated_amount(
+                        original_amount,
+                        is_oneonta=is_oneonta_row,
+                    )
+                    record_textbox_replacement(
+                        textbox_replacements,
+                        ambiguous_textbox_amounts,
+                        original_amount,
+                        updated_amount,
+                    )
 
                     # Use Word's Find/Replace with wildcard matching
                     find = cell_range.Find
@@ -176,8 +218,6 @@ def analyze_word_document(file_path):
 
                         for match in matches:
                             original_amount = match.group(0)
-                            parsed_value = parse_dollar_amount(original_amount)
-                            
                             # Check if this page's table has any rows with Oneonta market
                             market_col_index = None
                             table = page_tables.get(page_num)
@@ -198,17 +238,10 @@ def analyze_word_document(file_path):
                                             break
                             
                             # Apply special margin for Oneonta pages
-                            if is_oneonta_page:
-                                # 24.11% margin for Oneonta (multiplication by 1.3177)
-                                multiplied_value = parsed_value * 1.3177
-                            else:
-                                # Standard 15% margin for other markets
-                                multiplied_value = parsed_value / 0.85
-                                
-                            # Round down to nearest dollar only when there are cents (non-zero decimal part)
-                            if multiplied_value != int(multiplied_value):
-                                multiplied_value = int(multiplied_value)
-                            updated_amount = format_dollar_amount(multiplied_value)
+                            updated_amount = calculate_updated_amount(
+                                original_amount,
+                                is_oneonta=is_oneonta_page,
+                            )
 
                             # Find and replace in shape text
                             find = text_range.Find
@@ -243,10 +276,19 @@ def analyze_word_document(file_path):
         print("Amounts updated successfully while preserving formatting.")
 
     finally:
-        # Save and close document
-        doc.Save()
-        doc.Close(True)
-        word.Quit()
+        # Save and close document with error handling
+        try:
+            if 'doc' in locals():
+                doc.Save()
+                doc.Close(True)
+        except Exception as e:
+            print(f"Error saving/closing document: {e}")
+        finally:
+            try:
+                if 'word' in locals():
+                    word.Quit()
+            except Exception as e:
+                print(f"Error quitting Word application: {e}")
 
         
 

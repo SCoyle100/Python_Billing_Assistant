@@ -3,7 +3,6 @@
 import sys
 import re
 import pandas as pd
-import win32com.client
 from docx import Document as DocxDocument
 
 from utils.openai_json import chat_completion_json
@@ -55,15 +54,6 @@ def looks_like_intro_line(text: str) -> bool:
     return False
 
 
-def paragraph_lines_from_com_cell(cell):
-    lines = []
-    for paragraph_index in range(1, cell.Range.Paragraphs.Count + 1):
-        text = clean_word_text(cell.Range.Paragraphs(paragraph_index).Range.Text)
-        if text:
-            lines.append(text)
-    return lines
-
-
 def paragraph_lines_from_docx_cell(cell):
     lines = []
     for paragraph in cell.paragraphs:
@@ -80,6 +70,15 @@ def row_texts_from_docx_row(row):
         if text:
             texts.append(text)
     return texts
+
+
+def table_text_from_docx(table):
+    row_texts = []
+    for row in table.rows:
+        cell_texts = row_texts_from_docx_row(row)
+        if cell_texts:
+            row_texts.append(" | ".join(cell_texts))
+    return "\n".join(row_texts)
 
 
 def find_detail_row_index_docx(table):
@@ -254,16 +253,16 @@ def extract_capitol_media_rows_with_openai(table_text):
     return invoices
 
 
-def find_invoice_table(doc):
+def find_invoice_table(docx_doc):
     """
     Use OpenAI to dynamically identify which table contains the invoice data.
     """
-    print(f"DEBUG: Searching through {doc.Tables.Count} tables for invoice data")
-    
-    for table_index in range(1, doc.Tables.Count + 1):  # 1-based indexing
+    table_count = len(docx_doc.tables)
+    print(f"DEBUG: Searching through {table_count} tables for invoice data")
+
+    for table_index, table in enumerate(docx_doc.tables, start=1):
         try:
-            table = doc.Tables(table_index)
-            table_text = table.Range.Text
+            table_text = table_text_from_docx(table)
             print(f"DEBUG: Checking table {table_index}, text length: {len(table_text)}")
             
             result = identify_invoice_table_with_openai(table_text)
@@ -283,9 +282,9 @@ def find_invoice_table(doc):
     
     # Fallback to first table if no table is confidently identified
     print("DEBUG: No table confidently identified, using first table as fallback")
-    if doc.Tables.Count > 0:
-        table = doc.Tables(1)
-        return 1, table, table.Range.Text
+    if docx_doc.tables:
+        table = docx_doc.tables[0]
+        return 1, table, table_text_from_docx(table)
     
     return None, None, None
 
@@ -300,54 +299,32 @@ def build_dataframe_from_capitol_media(file_path: str) -> pd.DataFrame:
     """
     try:
         print(f"DEBUG: Processing Capitol Media file: {file_path}")
-        
-        # 1. Initialize Word
-        word = win32com.client.Dispatch("Word.Application")
-        word.Visible = False  # Make True for debugging
 
-        # 2. Open the document and find the correct table
-        doc = word.Documents.Open(file_path)
-        
+        docx_doc = DocxDocument(file_path)
+
         # Check if document has any tables
-        if doc.Tables.Count == 0:
+        if not docx_doc.tables:
             print("DEBUG: No tables found in document")
-            doc.Close(False)
-            word.Quit()
             return pd.DataFrame(columns=['Market', 'Amount'])
         
-        print(f"DEBUG: Found {doc.Tables.Count} tables in document")
+        print(f"DEBUG: Found {len(docx_doc.tables)} tables in document")
         
         # Dynamically find the table with invoice data
-        table_index, table, table_text = find_invoice_table(doc)
+        table_index, table, table_text = find_invoice_table(docx_doc)
         
         if table_index is None or table is None or table_text is None:
             print("DEBUG: No suitable table found")
-            doc.Close(False)
-            word.Quit()
             return pd.DataFrame(columns=['Market', 'Amount'])
         
         print(f"DEBUG: Table text length: {len(table_text)}")
         print(f"DEBUG: Table text preview: {table_text[:500]}...")
 
-        # 3. Close doc & Word to free resources
-        doc.Close(False)
-        word.Quit()
-
         deterministic_rows = []
         intro_lines = []
         try:
-            docx_doc = DocxDocument(file_path)
-            if 0 < table_index <= len(docx_doc.tables):
-                intro_lines, deterministic_rows = build_deterministic_capitol_rows_from_docx_table(
-                    docx_doc.tables[table_index - 1]
-                )
-                print(f"DEBUG: Deterministic intro lines: {intro_lines}")
-                print(f"DEBUG: Deterministic invoice row count: {len(deterministic_rows)}")
-            else:
-                print(
-                    f"DEBUG: Selected table index {table_index} is out of range for python-docx tables "
-                    f"({len(docx_doc.tables)} found)"
-                )
+            intro_lines, deterministic_rows = build_deterministic_capitol_rows_from_docx_table(table)
+            print(f"DEBUG: Deterministic intro lines: {intro_lines}")
+            print(f"DEBUG: Deterministic invoice row count: {len(deterministic_rows)}")
         except Exception as deterministic_exc:
             print(f"DEBUG: Deterministic Capitol parser failed: {deterministic_exc}")
 
