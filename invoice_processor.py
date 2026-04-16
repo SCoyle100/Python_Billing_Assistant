@@ -6,16 +6,17 @@ import tkinter as tk
 from tkinter import filedialog
 from PIL import Image
 
-def process_invoice():
-    # Initialize a tkinter root (it won't show a window)
-    root = tk.Tk()
-    root.withdraw()
+def process_invoice(input_file_path=None, output_stem="cropped_image"):
+    if input_file_path is None:
+        # Initialize a tkinter root (it won't show a window)
+        root = tk.Tk()
+        root.withdraw()
 
-    # Open file dialog to select the input image
-    input_file_path = filedialog.askopenfilename(
-        title="Select an invoice image",
-        filetypes=[("Image Files", "*.tif *.tiff *.png *.jpg *.jpeg *.bmp"), ("All Files", "*.*")]
-    )
+        # Open file dialog to select the input image
+        input_file_path = filedialog.askopenfilename(
+            title="Select an invoice image",
+            filetypes=[("Image Files", "*.tif *.tiff *.png *.jpg *.jpeg *.bmp"), ("All Files", "*.*")]
+        )
 
     if not input_file_path:
         raise FileNotFoundError("No file selected. Please select a valid image file.")
@@ -26,7 +27,7 @@ def process_invoice():
 
     # Create "images" directory in the script's location
     script_dir = os.path.dirname(__file__)
-    images_dir = os.path.join(script_dir, "images")
+    images_dir = os.path.join(script_dir, "payment images")
     os.makedirs(images_dir, exist_ok=True)
 
     # OpenCV Cropping Part
@@ -63,7 +64,7 @@ def process_invoice():
         y_max = max(y_max, y + h)
 
     cropped_image_array = image[y_min:y_max, x_min:x_max]
-    intermediate_path = os.path.join(images_dir, "cropped_image.png")
+    intermediate_path = os.path.join(images_dir, f"{output_stem}.png")
     cv2.imwrite(intermediate_path, cropped_image_array)
     print(f"Intermediate cropped image saved at {intermediate_path}")
 
@@ -87,13 +88,17 @@ def process_invoice():
         )
         return resized_cropped_img
 
-    final_output_path = os.path.join(images_dir, "cropped_image_final.png")
+    final_output_path = os.path.join(images_dir, f"{output_stem}_final.png")
+    if os.path.exists(final_output_path):
+        os.remove(final_output_path)
+
     try:
         final_cropped_image = crop_whitespace_below_word(intermediate_path, word="total")
         final_cropped_image.save(final_output_path)
         print(f"Final processed image saved to: {final_output_path}")
     except Exception as e:
         print(f"Error during Tesseract processing: {e}")
+        final_output_path = intermediate_path
 
     return final_output_path
 

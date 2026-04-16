@@ -35,6 +35,7 @@ def analyze_image_with_openai(image_path):
                     },
                 ],
             }],
+            temperature=0,
             max_tokens=1000,
         )
 
@@ -46,18 +47,31 @@ def analyze_image_with_openai(image_path):
         return None
 
 def parse_plaintext_to_dataframe(text):
-    # Use regex to find lines with pattern: "- <invoice>: $<amount>"
-    pattern = r"-\s*(\d+):\s*\$(.*)"
-    entries = re.findall(pattern, text)
+    # Match invoice IDs like "112401" and "112926-P".
+    pattern = r"^\s*(?:[-*]\s*)?(\d{6}(?:[-_/ \t]*[A-Za-z]+(?:_[A-Za-z]+)?)?):\s*\$?\s*([^\r\n]+)"
+    entries = re.findall(pattern, text, flags=re.MULTILINE)
     
     # Build list of dictionaries from entries
     data = []
     for invoice, amount in entries:
-        data.append({"invoice #": int(invoice), "net invoice amount": amount.strip()})
+        invoice = re.sub(r"\s+", "-", invoice.strip())
+        data.append({"invoice #": invoice.strip(), "net invoice amount": amount.strip()})
     
     # Create DataFrame
     df = pd.DataFrame(data, columns=["invoice #", "net invoice amount"])
     return df
+
+def sort_invoices(df):
+    df = df.copy()
+    df["invoice #"] = df["invoice #"].astype(str).str.strip()
+    sort_parts = df["invoice #"].str.extract(r"^(\d+)(.*)$")
+    df["_invoice_number"] = pd.to_numeric(sort_parts[0], errors="coerce")
+    df["_invoice_suffix"] = sort_parts[1].fillna("")
+    df = df.sort_values(
+        by=["_invoice_number", "_invoice_suffix", "invoice #"],
+        na_position="last",
+    )
+    return df.drop(columns=["_invoice_number", "_invoice_suffix"])
 
 
 
@@ -79,13 +93,20 @@ if __name__ == "__main__":
                 df = parse_plaintext_to_dataframe(analysis_result)
 
             if df is not None and not df.empty:
-                df["invoice #"] = pd.to_numeric(df["invoice #"], errors='coerce')
-                df = df.sort_values(by="invoice #")
-                df.set_index("invoice #", inplace=True)
-                full_range = range(int(df.index.min()), int(df.index.max()) + 1)
-                df = df.reindex(full_range)
-                df.reset_index(inplace=True)
-                df.rename(columns={"index": "invoice #"}, inplace=True)
+                df["invoice #"] = df["invoice #"].astype(str).str.strip()
+                has_suffix = df["invoice #"].str.contains(r"\D", regex=True).any()
+
+                if has_suffix:
+                    df = sort_invoices(df)
+                else:
+                    df["invoice #"] = pd.to_numeric(df["invoice #"], errors='coerce')
+                    df = df.sort_values(by="invoice #")
+                    df.set_index("invoice #", inplace=True)
+                    full_range = range(int(df.index.min()), int(df.index.max()) + 1)
+                    df = df.reindex(full_range)
+                    df.reset_index(inplace=True)
+                    df.rename(columns={"index": "invoice #"}, inplace=True)
+
                 df["net invoice amount"] = df["net invoice amount"].fillna("")
 
                 print(df)
