@@ -1,6 +1,6 @@
 # Matrix OpenXML Textbox Tool
 
-This is an experimental C# helper for Matrix Media textbox rewrites.
+This is a C# helper for Matrix Media DOCX rewrites.
 
 Location:
 
@@ -10,8 +10,9 @@ Location:
 
 - Opens a `.docx` as an Open XML package
 - Scans `word/*.xml` parts
+- Rewrites Matrix Media table amount cells using the same non-Oneonta and Oneonta formulas as the old COM path
 - Finds Word textbox content nodes (`w:txbxContent`)
-- Applies explicit string replacements inside textbox paragraphs
+- Applies explicit string replacements inside textbox paragraphs when the replacement is unambiguous
 
 ## What It Does Not Solve
 
@@ -45,8 +46,19 @@ or:
 
 If the variable is unset, the wrapper does nothing.
 
-## Planned Usage
+When `MATRIX_OPENXML_TEXTBOX_TOOL` points to a `.dll`, the wrapper looks for:
 
-Once built, the helper is intended to be used only when Matrix textbox replacements are unambiguous. Otherwise the Python path should continue to fall back to COM.
+- `MATRIX_OPENXML_DOTNET`
+- `dotnet` on `PATH`
+- `/mnt/c/Program Files/dotnet/dotnet.exe` from WSL
+- `/mnt/c/Program Files (x86)/dotnet/dotnet.exe` from WSL
 
-At the moment it is **scaffolded but not enabled in the live rewrite path by default**. The current COM flow keeps the document open inside Word while editing, and an external Open XML post-processor should only be tested against a closed/saved document to avoid overwrite risk.
+## Pipeline Usage
+
+The default Matrix rewrite backend now tries the native `.NET` OpenXML rewriter first. The Python path falls back to Word COM only when the native rewriter fails, or when `MATRIX_REWRITER=word` is set.
+
+The standalone textbox post-pass still exists for comparison, but the preferred native command is:
+
+```bash
+dotnet MatrixOpenXmlTextboxTool.dll rewrite-matrix-amounts --docx /path/to/matrix.docx
+```

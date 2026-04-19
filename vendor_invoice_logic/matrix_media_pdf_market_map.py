@@ -76,7 +76,7 @@ def _extract_service_period(lines: list[str]) -> str:
 
 def _is_market_candidate(line: str) -> bool:
     lowered = line.lower()
-    if lowered in {"market", "amount", "description", "service period"}:
+    if lowered in {"market", "amount", "description", "service period", "qty"}:
         return False
     if "invoice" in lowered or "total" in lowered:
         return False

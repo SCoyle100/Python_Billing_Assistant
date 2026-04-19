@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -13,9 +14,11 @@ from pdf_to_docx_ import PDFConverter
 from vendor_invoice_logic.capitol_media_dataframe_1 import build_dataframe_from_capitol_media
 from vendor_invoice_logic.capitol_media_rebuild import rebuild_capitol_media_table
 from vendor_invoice_logic.matrix_media_dataframe import build_dataframe_from_word_document
-from vendor_invoice_logic.matrix_media_logic import analyze_word_document
-from vendor_invoice_logic.matrix_media_market_map import read_page_markets
 from vendor_invoice_logic.matrix_media_pdf_market_map import read_page_markets_from_pdf
+from .dotnet_document_tool import (
+    convert_docx_to_pdf_with_syncfusion,
+    rewrite_matrix_amounts_with_dotnet,
+)
 
 from .interfaces import (
     CapitolTableRebuilder,
@@ -49,6 +52,12 @@ class WordComMatrixPageMapper(MatrixPageMapper):
         file_path: str,
         source_pdf_path: str | None = None,
     ) -> dict[int, Any]:
+        try:
+            from vendor_invoice_logic.matrix_media_market_map import read_page_markets
+        except ImportError as exc:
+            logger.warning("Word COM Matrix page mapper is unavailable: %s", exc)
+            return {}
+
         return read_page_markets(file_path)
 
 
@@ -108,7 +117,45 @@ class FallbackMatrixPageMapper(MatrixPageMapper):
 
 class WordComMatrixDocumentRewriter(MatrixDocumentRewriter):
     def rewrite(self, file_path: str) -> None:
+        from vendor_invoice_logic.matrix_media_logic import analyze_word_document
+
         analyze_word_document(file_path)
+
+
+class DotNetMatrixDocumentRewriter(MatrixDocumentRewriter):
+    def rewrite(self, file_path: str) -> None:
+        if not rewrite_matrix_amounts_with_dotnet(file_path):
+            raise RuntimeError(f".NET Matrix document rewriter failed for {file_path}")
+
+
+@dataclass
+class FallbackMatrixDocumentRewriter(MatrixDocumentRewriter):
+    primary: MatrixDocumentRewriter
+    fallback: MatrixDocumentRewriter
+
+    def rewrite(self, file_path: str) -> None:
+        if os.getenv("MATRIX_REWRITER", "").lower() == "word":
+            self.fallback.rewrite(file_path)
+            return
+
+        try:
+            self.primary.rewrite(file_path)
+            logger.info(
+                "Matrix document rewriter used primary backend %s for %s",
+                type(self.primary).__name__,
+                file_path,
+            )
+            return
+        except Exception as exc:
+            logger.warning(
+                "Matrix document rewriter primary backend %s failed for %s: %s. Falling back to %s",
+                type(self.primary).__name__,
+                file_path,
+                exc,
+                type(self.fallback).__name__,
+            )
+
+        self.fallback.rewrite(file_path)
 
 
 @dataclass
@@ -127,6 +174,11 @@ class FunctionCapitolTableRebuilder(CapitolTableRebuilder):
 class WordComDocxToPdfRenderer(DocxToPdfRenderer):
     def render(self, docx_path: str) -> str | None:
         return create_pdf_from_docx(docx_path)
+
+
+class SyncfusionDocxToPdfRenderer(DocxToPdfRenderer):
+    def render(self, docx_path: str) -> str | None:
+        return convert_docx_to_pdf_with_syncfusion(docx_path)
 
 
 class FitzPdfToImageGenerator(PdfToImageGenerator):
@@ -163,7 +215,43 @@ class WordComDocxToImageGenerator(DocxToImageGenerator):
         )
 
 
+@dataclass
+class RenderedPdfDocxToImageGenerator(DocxToImageGenerator):
+    docx_to_pdf: DocxToPdfRenderer
+    pdf_to_images: PdfToImageGenerator
+
+    def generate(
+        self,
+        docx_path: str,
+        vendor_name: str,
+        invoice_data: list[tuple[Any, ...]] | None = None,
+        page_market_mapping: dict[int, Any] | None = None,
+    ) -> list[str]:
+        pdf_path = self.docx_to_pdf.render(docx_path)
+        if not pdf_path:
+            return []
+
+        return self.pdf_to_images.generate(
+            pdf_path,
+            dpi=600,
+            vendor_name=vendor_name,
+            invoice_data=invoice_data,
+            page_market_mapping=page_market_mapping,
+        )
+
+
 def build_default_document_services() -> DocumentProcessingServices:
+    pdf_to_images = FitzPdfToImageGenerator()
+    if os.getenv("SYNCFUSION_LICENSE_KEY"):
+        docx_to_pdf = SyncfusionDocxToPdfRenderer()
+        docx_to_images = RenderedPdfDocxToImageGenerator(
+            docx_to_pdf=docx_to_pdf,
+            pdf_to_images=pdf_to_images,
+        )
+    else:
+        docx_to_pdf = WordComDocxToPdfRenderer()
+        docx_to_images = WordComDocxToImageGenerator()
+
     return DocumentProcessingServices(
         pdf_to_docx=AdobePdfToDocxConverter(converter=PDFConverter()),
         matrix=MatrixVendorBackend(
@@ -171,7 +259,10 @@ def build_default_document_services() -> DocumentProcessingServices:
                 primary=PdfMatrixPageMapper(),
                 fallback=WordComMatrixPageMapper(),
             ),
-            document_rewriter=WordComMatrixDocumentRewriter(),
+            document_rewriter=FallbackMatrixDocumentRewriter(
+                primary=DotNetMatrixDocumentRewriter(),
+                fallback=WordComMatrixDocumentRewriter(),
+            ),
             dataframe_builder=FunctionDataFrameBuilder(builder=build_dataframe_from_word_document),
         ),
         capitol=CapitolVendorBackend(
@@ -179,8 +270,8 @@ def build_default_document_services() -> DocumentProcessingServices:
             table_rebuilder=FunctionCapitolTableRebuilder(),
         ),
         rendering=RenderingBackend(
-            docx_to_pdf=WordComDocxToPdfRenderer(),
-            pdf_to_images=FitzPdfToImageGenerator(),
-            docx_to_images=WordComDocxToImageGenerator(),
+            docx_to_pdf=docx_to_pdf,
+            pdf_to_images=pdf_to_images,
+            docx_to_images=docx_to_images,
         ),
     )

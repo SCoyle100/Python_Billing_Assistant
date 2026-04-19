@@ -26,7 +26,6 @@ from vendor_invoice_logic.vendor_id import identify_vendors_from_pdfs_in_directo
 
 
 from image_generation.create_pdf_image import resize_image
-from image_generation.shutterstock_crop import create_cropped_shutterstock_image
 
 from utils.pdf_utils import combine_vendor_pdfs
 from utils.openai_json import chat_completion_json
@@ -486,6 +485,8 @@ def create_shutterstock_image_for_fee_invoice(pdf_file_path, fee_invoice_row):
     )
 
     try:
+        from image_generation.shutterstock_crop import create_cropped_shutterstock_image
+
         if os.path.exists(output_image_path):
             os.remove(output_image_path)
 

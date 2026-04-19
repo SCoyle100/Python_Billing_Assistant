@@ -6,9 +6,13 @@ test_table_count.py
 test_table_mod.py
 test_total.py
 app.log
+logs/
 /output
 
 __pycache__/
+.venv/
+bin/
+obj/
 
 extracted_data.csv
 Formatted_Invoices.docx
@@ -37,5 +41,3 @@ output.csv
 *.db
 
 claude.md
-
-

@@ -3,7 +3,6 @@ import os
 import fitz  # PyMuPDF
 import logging
 from PIL import Image
-import win32com.client as win32
 from utils.decorators import performance_logger
 
 logging.basicConfig(level=logging.DEBUG)
@@ -20,6 +19,8 @@ def create_pdf_from_docx(docx_path):
             return pdf_path
         
         # Create the PDF from DOCX
+        import win32com.client as win32
+
         word_app = win32.Dispatch("Word.Application")
         doc = word_app.Documents.Open(normalized_path)
         doc.SaveAs(pdf_path, FileFormat=17)

@@ -1,6 +1,14 @@
-import win32com.client
+import logging
+import os
 import re
 import sys
+
+import win32com.client
+
+from vendor_invoice_logic.matrix_textbox_openxml import rewrite_textboxes_with_openxml
+
+
+logger = logging.getLogger(__name__)
 
 # Word constants
 wdActiveEndPageNumber = 3
@@ -54,6 +62,30 @@ def record_textbox_replacement(replacements, ambiguous_amounts, original_amount,
 
     if existing_value != updated_amount:
         ambiguous_amounts.add(original_amount)
+
+
+def run_openxml_textbox_post_pass(file_path, replacements, ambiguous_amounts):
+    if not os.getenv("MATRIX_OPENXML_TEXTBOX_TOOL"):
+        return False
+
+    safe_replacements = {
+        original: replacement
+        for original, replacement in replacements.items()
+        if original not in ambiguous_amounts
+    }
+
+    if ambiguous_amounts:
+        logger.warning(
+            "Skipping %s ambiguous Matrix textbox replacement(s): %s",
+            len(ambiguous_amounts),
+            ", ".join(sorted(ambiguous_amounts)),
+        )
+
+    if not safe_replacements:
+        logger.info("No safe Matrix textbox replacements available for OpenXML post-pass.")
+        return False
+
+    return rewrite_textboxes_with_openxml(file_path, safe_replacements)
 
 
 
@@ -242,6 +274,12 @@ def analyze_word_document(file_path):
                                 original_amount,
                                 is_oneonta=is_oneonta_page,
                             )
+                            record_textbox_replacement(
+                                textbox_replacements,
+                                ambiguous_textbox_amounts,
+                                original_amount,
+                                updated_amount,
+                            )
 
                             # Find and replace in shape text
                             find = text_range.Find
@@ -290,7 +328,20 @@ def analyze_word_document(file_path):
             except Exception as e:
                 print(f"Error quitting Word application: {e}")
 
-        
+    try:
+        if run_openxml_textbox_post_pass(
+            file_path,
+            textbox_replacements,
+            ambiguous_textbox_amounts,
+        ):
+            print("OpenXML textbox post-pass completed successfully.")
+        elif os.getenv("MATRIX_OPENXML_TEXTBOX_TOOL"):
+            print("OpenXML textbox post-pass skipped or did not modify the document.")
+    except Exception as e:
+        logger.warning("OpenXML textbox post-pass failed for %s: %s", file_path, e)
+        print(f"OpenXML textbox post-pass failed: {e}")
+
+
 
 
 
