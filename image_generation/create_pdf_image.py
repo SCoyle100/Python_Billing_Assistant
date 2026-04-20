@@ -14,10 +14,11 @@ def create_pdf_from_docx(docx_path):
         normalized_path = os.path.normpath(docx_path)
         pdf_path = os.path.splitext(normalized_path)[0] + ".pdf"
         
-        # Check if the PDF already exists, if so just return it
+        # Always regenerate the intermediate PDF because the DOCX is rewritten
+        # immediately before image creation.
         if os.path.exists(pdf_path):
-            logging.info(f"PDF already exists, reusing: {pdf_path}")
-            return pdf_path
+            logging.info(f"Removing stale intermediate PDF before regeneration: {pdf_path}")
+            os.remove(pdf_path)
         
         # Create the PDF from DOCX
         word_app = win32.Dispatch("Word.Application")

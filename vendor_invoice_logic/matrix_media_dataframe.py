@@ -22,6 +22,10 @@ def parse_dollar_amount(dollar_str):
         return 0.0
 
 
+def clean_word_cell_text(text):
+    return str(text or "").replace("\r", "").replace("\n", "").replace("\x07", "").strip()
+
+
 def build_dataframe_from_word_document(file_path):
     """
     Opens the Word document, reads each table that has a 'Market' and 'Amount' column,
@@ -74,11 +78,11 @@ def build_dataframe_from_word_document(file_path):
             for row_idx in range(2, num_rows + 1):
                 # Read the "Market" cell
                 market_cell = table.Cell(row_idx, market_col_index).Range.Text.strip()
-                market_value = market_cell.replace("\r", "").replace("\n", "")
+                market_value = clean_word_cell_text(market_cell)
 
                 # Read the "Amount" cell
                 amount_cell = table.Cell(row_idx, amount_col_index).Range.Text.strip()
-                amount_cell = amount_cell.replace("\r", "").replace("\n", "")
+                amount_cell = clean_word_cell_text(amount_cell)
 
                 # Find all dollar amounts in this cell
                 matches = list(dollar_amount_pattern.finditer(amount_cell))
@@ -108,13 +112,13 @@ def build_dataframe_from_word_document(file_path):
                 service_period_value = ""
                 if service_period_col_index is not None:
                     service_period_cell = table.Cell(row_idx, service_period_col_index).Range.Text.strip()
-                    service_period_value = service_period_cell.replace("\r", "").replace("\n", "")
+                    service_period_value = clean_word_cell_text(service_period_cell)
                 
                 # Read the "Description" cell if available
                 description_value = ""
                 if description_col_index is not None:
                     description_cell = table.Cell(row_idx, description_col_index).Range.Text.strip()
-                    description_value = description_cell.replace("\r", "").replace("\n", "")
+                    description_value = clean_word_cell_text(description_cell)
                 
                 # Store this row in our collections
                 rows_list.append({

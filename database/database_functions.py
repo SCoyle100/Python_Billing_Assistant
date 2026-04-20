@@ -5,6 +5,8 @@ import logging
 import pathlib
 import re
 import math
+import zipfile
+import xml.etree.ElementTree as ET
 
 
 
@@ -358,7 +360,7 @@ def clean_ttc_from_description(description):
     if not description or not isinstance(description, str):
         return ""
 
-    job_pattern = r"[A-Za-z]{2,4}[-\s]*\d{2,4}(?:\s*-\s*[A-Za-z])?"
+    job_pattern = r"TTC[-\s]*\d{2,4}(?:\s*-?\s*[A-Za-z])?"
     
     # Remove TTC numbers in parentheses (common pattern from SQLite database)
     # Examples: "(TTC-350)", "(TTC 350)", "( TTC-350 )", etc.
@@ -380,6 +382,117 @@ def clean_ttc_from_description(description):
 
 def is_fee_invoice_source(source):
     return str(source or "").strip().upper() in {"FEE INVOICE", "FEE INVOICES"}
+
+
+MATRIX_MEDIA_JOB_RULES = [
+    ("TTC-354", (r"\bCONYERS\b",)),
+    ("TTC-329", (r"\bPENSACOLA\b",)),
+    ("TTC-361", (r"\bFORT\s+PAYNE\b|\bFT\.?\s+PAYNE\b",)),
+    ("TTC-361", (r"\bONEONTA\b",)),
+    ("TTC-361", (r"\bBAY\s+MINETTE\b|\bMOBILE\b|\bHWY\s*59\b|\bCR\s*-?\s*48\b",)),
+]
+
+CAPITOL_MEDIA_JOB_RULES = [
+    (
+        "TTC-389",
+        (
+            r"\bRADIO\b",
+            r"\bBIRMINGHAM\b",
+            r"\bFT\.?\s+WALTON\b|\bFORT\s+WALTON\b",
+            r"\bHUNTSVILLE\b",
+            r"\bMOBILE\b",
+            r"\bMONTGOMERY\b",
+            r"\bPANAMA\s+CITY\b",
+            r"\bPENSACOLA\b",
+            r"\bTUSCALOOSA\b",
+        ),
+    ),
+]
+
+DOCX_SEARCH_TEXT_CACHE = {}
+
+
+def normalize_search_text(*parts):
+    combined = " ".join(str(part or "") for part in parts)
+    combined = combined.replace("\r", " ").replace("\n", " ").replace("\x07", " ")
+    combined = re.sub(r"\s+", " ", combined).strip().upper()
+    return combined
+
+
+def extract_docx_search_text(docx_file_path):
+    if not docx_file_path:
+        return ""
+
+    path = pathlib.Path(docx_file_path)
+    if not path.exists() or path.suffix.lower() != ".docx":
+        return ""
+
+    cache_key = str(path)
+    if cache_key in DOCX_SEARCH_TEXT_CACHE:
+        return DOCX_SEARCH_TEXT_CACHE[cache_key]
+
+    try:
+        with zipfile.ZipFile(path) as archive:
+            xml_bytes = archive.read("word/document.xml")
+    except Exception as exc:
+        logging.debug("Could not read DOCX text for job-number matching from %s: %s", path, exc)
+        DOCX_SEARCH_TEXT_CACHE[cache_key] = ""
+        return ""
+
+    try:
+        namespace = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+        root = ET.fromstring(xml_bytes)
+        text_parts = [
+            text_node.text or ""
+            for text_node in root.findall(".//w:t", namespace)
+            if text_node.text
+        ]
+        search_text = normalize_search_text(*text_parts)
+    except Exception as exc:
+        logging.debug("Could not parse DOCX text for job-number matching from %s: %s", path, exc)
+        search_text = ""
+
+    DOCX_SEARCH_TEXT_CACHE[cache_key] = search_text
+    return search_text
+
+
+def first_matching_job_number(search_text, rules):
+    for job_number, patterns in rules:
+        if all(re.search(pattern, search_text, re.IGNORECASE) for pattern in patterns):
+            return job_number
+    return ""
+
+
+def normalize_job_number_base(job_number):
+    match = re.search(
+        r"\b([A-Za-z]{2,4})\s*-?\s*(\d{2,4})(?:\s*-?\s*[A-Za-z])?\b",
+        str(job_number or ""),
+        re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    return f"{match.group(1).upper()}-{match.group(2)}"
+
+
+def infer_hardcoded_vendor_job_number(
+    source,
+    market,
+    service_period="",
+    description="",
+    docx_file_path=None,
+):
+    normalized_source = str(source or "").strip()
+    row_text = normalize_search_text(market, service_period, description)
+
+    if normalized_source == "Matrix Media":
+        return first_matching_job_number(row_text, MATRIX_MEDIA_JOB_RULES)
+
+    if normalized_source == "Capitol Media":
+        docx_text = extract_docx_search_text(docx_file_path)
+        search_text = normalize_search_text(row_text, docx_text)
+        return first_matching_job_number(search_text, CAPITOL_MEDIA_JOB_RULES)
+
+    return ""
 
 
 def unpack_invoice_item(invoice_item, source):
@@ -407,7 +520,11 @@ def unpack_invoice_item(invoice_item, source):
 
         if len(invoice_item) >= 4:
             desc, amt, service_period, description = invoice_item[:4]
-            return desc, amt, service_period, description, "", ""
+            if len(invoice_item) >= 5:
+                explicit_job_number = invoice_item[4] or ""
+            if len(invoice_item) >= 6:
+                explicit_invoice_suffix = invoice_item[5] or ""
+            return desc, amt, service_period, description, explicit_job_number, explicit_invoice_suffix
 
     raise ValueError(f"Unexpected invoice format: {invoice_item}")
 
@@ -587,94 +704,96 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
             #logging.info(f"Enhanced invoice without service period: Market='{normalized_desc}', Amount='{amt}', InvoiceNo='{current_invoice_no}'")
             enhanced_invoices.append((normalized_desc, amt, invoice_no_to_store, "", ""))
         
-        # Get service_period and description if available in enhanced_invoices
-        service_period = ""
-        description = ""
-        found_exact_match = False
-        
-        # First look for an exact match of market AND service period if available
-        if len(invoice_item) >= 3:  # If this sorted item has service period info
-            item_components = list(invoice_item) + ["", ""]  # Ensure we have enough elements
-            normalized_desc, amt = item_components[0], item_components[1]
-            
-            # Check if the third element might be service_period instead of invoice_no
-            # (invoice_no is usually added by database, not present in original invoice_item)
-            if isinstance(item_components[2], str) and ("/" in item_components[2] or "-" in item_components[2]):
-                # Looks like a service period in third position
-                service_period = item_components[2]
-                description = item_components[3] if len(item_components) > 3 else ""
-            else:
-                # Normal case - try to get service period from 4th position
-                service_period = item_components[3] if len(item_components) > 3 else ""
-                description = item_components[4] if len(item_components) > 4 else ""
-            
-            found_exact_match = True
-            logging.info(f"Extracted from sorted item - Market: '{normalized_desc}', ServicePeriod: '{service_period}', Description: '{description}'")
-        
-        # If we don't have service period info in the sorted item, try to find it in original invoices
-        if not found_exact_match:
-            for item in invoices:
-                if len(item) >= 3:
-                    orig_desc, amt, *extra_fields = item
-                    if orig_desc == normalized_desc:
-                        # If the original tuple has service period and description
-                        if len(extra_fields) >= 2:
-                            service_period = extra_fields[0] if extra_fields[0] is not None else ""
-                            description = extra_fields[1] if extra_fields[1] is not None else ""
-                            break
-                        # If we're using the matrix media dataframe structure
-                        elif isinstance(item, tuple) and hasattr(item, '_asdict'):
-                            item_dict = item._asdict()
-                            service_period = item_dict.get('ServicePeriod', '')
-                            description = item_dict.get('Description', '')
-                            break
+        try:
+            _, _, service_period, description, explicit_job_number, explicit_invoice_suffix = unpack_invoice_item(
+                invoice_item, source
+            )
+            logging.info(
+                "Extracted from sorted item - Market: '%s', ServicePeriod: '%s', Description: '%s'",
+                normalized_desc,
+                service_period,
+                description,
+            )
+        except ValueError:
+            service_period = ""
+            description = ""
                     
-        # Get job number if available (for data from email extraction)
-        job_number = explicit_job_number if explicit_job_number else ""
-        
-        # Check if any of the invoice items in the original invoices list has a job number
-        # Job number would be in the third position if present
-        for item in invoices:
-            if isinstance(item, tuple) and len(item) >= 3:
-                # Check if the third element might be a job number
-                potential_job = item[2] if item[2] is not None else ""
-                
-                # Handle pandas NaN or float values that might come from dataframes
-                if isinstance(potential_job, float):
-                    if math.isnan(potential_job):
-                        potential_job = ""
-                    else:
-                        potential_job = str(potential_job)
-                elif not isinstance(potential_job, str):
-                    potential_job = str(potential_job) if potential_job is not None else ""
-                
-                # Match market name (normalized_desc) with item's description (item[0])
-                # Use a more flexible match to handle minor differences in whitespace/case
-                item_desc = str(item[0]).strip().upper() if item[0] is not None else ""
-                norm_desc = normalized_desc.strip().upper()
-                
-                # If descriptions match approximately and we have a potential job number
-                desc_match = (
-                    item_desc == norm_desc or 
-                    item_desc.startswith(norm_desc + " ") or 
-                    norm_desc.startswith(item_desc + " ")
-                )
-                
-                if potential_job and desc_match:
-                    job_number = potential_job
-                    logging.info(f"Found job number '{job_number}' for market '{normalized_desc}'")
-                    break
+        # Matrix job numbers are stable by known market patterns. Capitol usually gets
+        # new project numbers, so only hardcode known recurring market-radio work.
+        hardcoded_job_number = infer_hardcoded_vendor_job_number(
+            source,
+            normalized_desc,
+            service_period,
+            description,
+            docx_file_path,
+        )
+        if source == "Matrix Media":
+            job_number = hardcoded_job_number or explicit_job_number or ""
+        elif source == "Capitol Media":
+            job_number = explicit_job_number or hardcoded_job_number or ""
+        else:
+            job_number = explicit_job_number or hardcoded_job_number or ""
+
+        if hardcoded_job_number:
+            logging.info(
+                "Applied hardcoded job number '%s' for %s market '%s'",
+                hardcoded_job_number,
+                source,
+                normalized_desc,
+            )
+        if (
+            source == "Matrix Media"
+            and hardcoded_job_number
+            and explicit_job_number
+            and normalize_job_number_base(hardcoded_job_number) != normalize_job_number_base(explicit_job_number)
+        ):
+            warning_message = (
+                f"Matrix email job number '{explicit_job_number}' differs from hardcoded "
+                f"job number '{hardcoded_job_number}' for market '{normalized_desc}'. "
+                "Using the hardcoded job number."
+            )
+            logging.warning(warning_message)
+            print(f"WARNING: {warning_message}")
+
+        # Check fee invoice items for job numbers from email extraction. Vendor rows use
+        # service_period in the third tuple position, so this must stay fee-only.
+        if not job_number and is_fee_invoice_source(source):
+            for item in invoices:
+                if isinstance(item, tuple) and len(item) >= 3:
+                    potential_job = item[2] if item[2] is not None else ""
+
+                    if isinstance(potential_job, float):
+                        if math.isnan(potential_job):
+                            potential_job = ""
+                        else:
+                            potential_job = str(potential_job)
+                    elif not isinstance(potential_job, str):
+                        potential_job = str(potential_job) if potential_job is not None else ""
+
+                    item_desc = str(item[0]).strip().upper() if item[0] is not None else ""
+                    norm_desc = normalized_desc.strip().upper()
+
+                    desc_match = (
+                        item_desc == norm_desc or
+                        item_desc.startswith(norm_desc + " ") or
+                        norm_desc.startswith(item_desc + " ")
+                    )
+
+                    if potential_job and desc_match:
+                        job_number = potential_job
+                        logging.info(f"Found job number '{job_number}' for market '{normalized_desc}'")
+                        break
                 
         # If we still don't have a job number, try to extract it from the description
         # This requires importing re module, but if we don't have access to the extract_job_number_from_description
         # function, we can do a simple check for common patterns
         if not job_number and description:
             # Look for patterns like "TTC 350" or "TTC-350" in the description
-            job_match = re.search(r"\b([A-Za-z]{2,4}[-\s]*\d{2,4}(?:\s*-\s*[A-Za-z])?)\b", description, re.IGNORECASE)
+            job_match = re.search(r"\b(TTC[-\s]*\d{2,4}(?:\s*-?\s*[A-Za-z])?)\b", description, re.IGNORECASE)
             if job_match:
                 potential_job = job_match.group(1)
                 # Make sure it has a hyphen
-                normalized_match = re.match(r"([A-Za-z]+)\s*-?\s*(\d+)(?:\s*-\s*([A-Za-z]))?", potential_job)
+                normalized_match = re.match(r"([A-Za-z]+)\s*-?\s*(\d+)(?:\s*-?\s*([A-Za-z]))?", potential_job)
                 if normalized_match:
                     prefix, number, job_suffix = normalized_match.groups()
                     potential_job = f"{prefix}-{number}"
@@ -699,7 +818,7 @@ def save_invoices_to_db(invoices, batch_id, source="FEE INVOICE", docx_file_path
 
             
         if job_number:
-            parts = re.match(r"([A-Za-z]+)\s*-?\s*(\d+)(?:\s*-\s*([A-Za-z]))?", job_number)
+            parts = re.match(r"([A-Za-z]+)\s*-?\s*(\d+)(?:\s*-?\s*([A-Za-z]))?", job_number)
             if parts:
                 prefix, number, job_suffix = parts.groups()
                 job_number = f"{prefix}-{number}"
