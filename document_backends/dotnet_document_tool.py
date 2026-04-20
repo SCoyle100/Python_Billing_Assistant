@@ -23,6 +23,8 @@ def _candidate_dotnet_commands() -> list[str]:
 
     candidates.extend(
         [
+            r"C:\Program Files\dotnet\dotnet.exe",
+            r"C:\Program Files (x86)\dotnet\dotnet.exe",
             "/mnt/c/Program Files/dotnet/dotnet.exe",
             "/mnt/c/Program Files (x86)/dotnet/dotnet.exe",
         ]
@@ -31,10 +33,13 @@ def _candidate_dotnet_commands() -> list[str]:
     return candidates
 
 
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
 def _default_tool_path() -> str:
-    repo_root = Path(__file__).resolve().parents[1]
     return str(
-        repo_root
+        _repo_root()
         / "dotnet"
         / "MatrixOpenXmlTextboxTool"
         / "bin"
@@ -42,6 +47,95 @@ def _default_tool_path() -> str:
         / "net8.0"
         / "MatrixOpenXmlTextboxTool.dll"
     )
+
+
+def _default_project_path() -> str:
+    return str(
+        _repo_root()
+        / "dotnet"
+        / "MatrixOpenXmlTextboxTool"
+        / "MatrixOpenXmlTextboxTool.csproj"
+    )
+
+
+def _find_dotnet_host() -> str | None:
+    for dotnet_path in _candidate_dotnet_commands():
+        if os.path.exists(dotnet_path) or shutil.which(dotnet_path):
+            return dotnet_path
+    return None
+
+
+def _is_windows_dotnet_host(dotnet_path: str) -> bool:
+    lowered = dotnet_path.lower().replace("\\", "/")
+    return lowered.endswith("/dotnet.exe") or lowered.endswith("dotnet.exe")
+
+
+def _running_under_wsl() -> bool:
+    try:
+        release = Path("/proc/sys/kernel/osrelease").read_text(errors="ignore").lower()
+    except OSError:
+        return False
+    return "microsoft" in release or "wsl" in release
+
+
+def _to_dotnet_path(path: str, dotnet_path: str) -> str:
+    if not path or not _is_windows_dotnet_host(dotnet_path) or not _running_under_wsl():
+        return path
+
+    if not path.startswith("/"):
+        return path
+
+    process = subprocess.run(
+        ["wslpath", "-w", path],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    converted_path = process.stdout.strip()
+    return converted_path or path
+
+
+def _build_default_tool_if_possible(tool_path: str) -> bool:
+    if os.path.abspath(tool_path) != os.path.abspath(_default_tool_path()):
+        return False
+
+    project_path = _default_project_path()
+    if not os.path.exists(project_path):
+        logger.warning("Document tool project was not found: %s", project_path)
+        return False
+
+    dotnet_path = _find_dotnet_host()
+    if not dotnet_path:
+        logger.warning("Cannot build document tool because no dotnet host was found.")
+        return False
+
+    logger.info("Document tool DLL was not found; building %s", project_path)
+    project_path_arg = os.path.relpath(project_path, _repo_root())
+    process = subprocess.run(
+        [
+            dotnet_path,
+            "build",
+            project_path_arg,
+            "-c",
+            "Release",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_subprocess_env_with_wsl_bridge(),
+        cwd=str(_repo_root()),
+    )
+
+    if process.stdout.strip():
+        logger.info("Document tool build stdout:\n%s", process.stdout.strip())
+    if process.stderr.strip():
+        logger.warning("Document tool build stderr:\n%s", process.stderr.strip())
+
+    if process.returncode != 0:
+        logger.warning("Document tool build exited with code %s", process.returncode)
+        return False
+
+    return os.path.exists(tool_path)
 
 
 def _resolve_tool_command() -> list[str] | None:
@@ -54,12 +148,13 @@ def _resolve_tool_command() -> list[str] | None:
 
     if tool_path.endswith(".dll"):
         if not os.path.exists(tool_path):
-            logger.warning("Document tool DLL was not found: %s", tool_path)
-            return None
+            if not _build_default_tool_if_possible(tool_path):
+                logger.warning("Document tool DLL was not found: %s", tool_path)
+                return None
 
-        for dotnet_path in _candidate_dotnet_commands():
-            if os.path.exists(dotnet_path) or shutil.which(dotnet_path):
-                return [dotnet_path, tool_path]
+        dotnet_path = _find_dotnet_host()
+        if dotnet_path:
+            return [dotnet_path, _to_dotnet_path(tool_path, dotnet_path)]
 
         logger.warning(
             "Document tool points to a .dll, but no dotnet host was found. "
@@ -105,14 +200,15 @@ def convert_docx_to_pdf_with_syncfusion(docx_path: str, output_path: str | None 
         return None
 
     output_pdf_path = output_path or str(Path(docx_path).with_suffix(".pdf"))
+    dotnet_path = command[0]
     process = subprocess.run(
         command
         + [
             "convert-docx-to-pdf",
             "--docx",
-            docx_path,
+            _to_dotnet_path(docx_path, dotnet_path),
             "--output",
-            output_pdf_path,
+            _to_dotnet_path(output_pdf_path, dotnet_path),
         ],
         capture_output=True,
         text=True,
@@ -145,12 +241,13 @@ def rewrite_matrix_amounts_with_dotnet(docx_path: str) -> bool:
     if not command:
         return False
 
+    dotnet_path = command[0]
     process = subprocess.run(
         command
         + [
             "rewrite-matrix-amounts",
             "--docx",
-            docx_path,
+            _to_dotnet_path(docx_path, dotnet_path),
         ],
         capture_output=True,
         text=True,

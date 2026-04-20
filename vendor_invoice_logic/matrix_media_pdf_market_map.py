@@ -78,9 +78,19 @@ def _is_market_candidate(line: str) -> bool:
     lowered = line.lower()
     if lowered in {"market", "amount", "description", "service period", "qty"}:
         return False
+    if lowered in {
+        "matrix media services",
+        "lawler ballard van durand",
+        "lawler ballard van durand (lbvd)",
+        "thompson tractor",
+        "jeremy mitchell",
+    }:
+        return False
     if "invoice" in lowered or "total" in lowered:
         return False
     if SERVICE_PERIOD_RE.search(line):
+        return False
+    if line.isdigit():
         return False
     if "$" in line:
         return False
@@ -90,6 +100,14 @@ def _is_market_candidate(line: str) -> bool:
 
 
 def _extract_market(lines: list[str]) -> str:
+    for index, line in enumerate(lines):
+        if not SERVICE_PERIOD_RE.search(line):
+            continue
+
+        for candidate in lines[index + 1:index + 6]:
+            if _is_market_candidate(candidate):
+                return normalize_market_name(candidate)
+
     market_header_seen = False
 
     for line in lines:

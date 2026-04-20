@@ -37,12 +37,11 @@ from utils.openai_json import chat_completion_json
 # Global batch_id so that PDF and Email inserts share the same batch id within the same run.
 #BATCH_ID = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
+load_dotenv()
+
 document_services = build_default_document_services()
 ASSIGNED_SPECIAL_VENDOR_INVOICES = {"Shutterstock": set()}
 BILLING_DATE_TEXT = None
-
-
-load_dotenv()
 
 # Import performance decorators and logging config
 from utils.decorators import performance_logger, cache_result, retry
