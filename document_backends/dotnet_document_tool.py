@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import logging
 import os
+import json
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 
@@ -56,6 +58,22 @@ def _default_project_path() -> str:
         / "MatrixOpenXmlTextboxTool"
         / "MatrixOpenXmlTextboxTool.csproj"
     )
+
+
+def _default_tool_needs_rebuild(tool_path: str) -> bool:
+    if os.path.abspath(tool_path) != os.path.abspath(_default_tool_path()):
+        return False
+
+    tool = Path(tool_path)
+    if not tool.exists():
+        return True
+
+    source_paths = [
+        Path(_default_project_path()),
+        _repo_root() / "dotnet" / "MatrixOpenXmlTextboxTool" / "Program.cs",
+    ]
+    tool_mtime = tool.stat().st_mtime
+    return any(path.exists() and path.stat().st_mtime > tool_mtime for path in source_paths)
 
 
 def _find_dotnet_host() -> str | None:
@@ -147,9 +165,9 @@ def _resolve_tool_command() -> list[str] | None:
     )
 
     if tool_path.endswith(".dll"):
-        if not os.path.exists(tool_path):
+        if _default_tool_needs_rebuild(tool_path):
             if not _build_default_tool_if_possible(tool_path):
-                logger.warning("Document tool DLL was not found: %s", tool_path)
+                logger.warning("Document tool DLL was not found or could not be rebuilt: %s", tool_path)
                 return None
 
         dotnet_path = _find_dotnet_host()
@@ -200,6 +218,10 @@ def convert_docx_to_pdf_with_syncfusion(docx_path: str, output_path: str | None 
         return None
 
     output_pdf_path = output_path or str(Path(docx_path).with_suffix(".pdf"))
+    if os.path.exists(output_pdf_path):
+        logger.info("Removing stale intermediate PDF before Syncfusion regeneration: %s", output_pdf_path)
+        os.remove(output_pdf_path)
+
     dotnet_path = command[0]
     process = subprocess.run(
         command
@@ -236,24 +258,59 @@ def convert_docx_to_pdf_with_syncfusion(docx_path: str, output_path: str | None 
     return output_pdf_path
 
 
-def rewrite_matrix_amounts_with_dotnet(docx_path: str) -> bool:
+def _write_page_market_map(page_market_mapping: dict | None) -> str | None:
+    if not page_market_mapping:
+        return None
+
+    normalized_map = {}
+    for page_num, page_data in page_market_mapping.items():
+        if isinstance(page_data, tuple):
+            market_text = " ".join(str(part or "") for part in page_data)
+        else:
+            market_text = str(page_data or "")
+        if market_text.strip():
+            normalized_map[str(page_num)] = market_text.strip()
+
+    if not normalized_map:
+        return None
+
+    fd, path = tempfile.mkstemp(prefix="matrix_page_markets_", suffix=".json")
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(normalized_map, handle)
+    return path
+
+
+def rewrite_matrix_amounts_with_dotnet(docx_path: str, page_market_mapping: dict | None = None) -> bool:
     command = _resolve_tool_command()
     if not command:
         return False
 
     dotnet_path = command[0]
-    process = subprocess.run(
-        command
-        + [
-            "rewrite-matrix-amounts",
-            "--docx",
-            _to_dotnet_path(docx_path, dotnet_path),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=_subprocess_env_with_wsl_bridge(),
-    )
+    page_market_map_path = _write_page_market_map(page_market_mapping)
+    command_args = command + [
+        "rewrite-matrix-amounts",
+        "--docx",
+        _to_dotnet_path(docx_path, dotnet_path),
+    ]
+    if page_market_map_path:
+        command_args.extend(
+            [
+                "--page-markets-json",
+                _to_dotnet_path(page_market_map_path, dotnet_path),
+            ]
+        )
+
+    try:
+        process = subprocess.run(
+            command_args,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=_subprocess_env_with_wsl_bridge(),
+        )
+    finally:
+        if page_market_map_path and os.path.exists(page_market_map_path):
+            os.remove(page_market_map_path)
 
     if process.stdout.strip():
         logger.info("Document tool stdout:\n%s", process.stdout.strip())

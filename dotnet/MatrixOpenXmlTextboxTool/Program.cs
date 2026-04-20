@@ -25,6 +25,7 @@ return args[0] switch
 static int RewriteMatrixAmounts(string[] args)
 {
     string? docxPath = null;
+    string? pageMarketsJsonPath = null;
 
     for (var index = 0; index < args.Length; index++)
     {
@@ -32,6 +33,9 @@ static int RewriteMatrixAmounts(string[] args)
         {
             case "--docx":
                 docxPath = NextValue(args, ref index, "--docx");
+                break;
+            case "--page-markets-json":
+                pageMarketsJsonPath = NextValue(args, ref index, "--page-markets-json");
                 break;
             default:
                 return Fail($"Unknown argument '{args[index]}'.");
@@ -54,6 +58,7 @@ static int RewriteMatrixAmounts(string[] args)
     var tableReplacementCount = 0;
     var modifiedTextboxParagraphs = 0;
     var textboxReplacementCount = 0;
+    var pageMarketTextByOrdinal = LoadPageMarketTextByOrdinal(pageMarketsJsonPath);
 
     try
     {
@@ -75,6 +80,7 @@ static int RewriteMatrixAmounts(string[] args)
                 part.Document,
                 textboxReplacements,
                 ambiguousTextboxAmounts,
+                pageMarketTextByOrdinal,
                 out var partModifiedCells,
                 out var partTableReplacements))
             {
@@ -355,6 +361,7 @@ static bool ProcessMatrixTablesInPart(
     XDocument document,
     IDictionary<string, string> textboxReplacements,
     ISet<string> ambiguousTextboxAmounts,
+    IReadOnlyDictionary<int, string> pageMarketTextByOrdinal,
     out int modifiedCells,
     out int replacementCount)
 {
@@ -364,8 +371,10 @@ static bool ProcessMatrixTablesInPart(
     replacementCount = 0;
     var changed = false;
 
+    var tableOrdinal = 0;
     foreach (var table in document.Descendants(w + "tbl").ToList())
     {
+        tableOrdinal++;
         var rows = table.Elements(w + "tr").ToList();
         if (rows.Count < 2)
         {
@@ -389,7 +398,10 @@ static bool ProcessMatrixTablesInPart(
             }
 
             var marketText = GetOpenXmlText(cells[marketColumnIndex.Value]);
-            var isOneonta = marketText.Contains("Oneonta", StringComparison.OrdinalIgnoreCase);
+            if (pageMarketTextByOrdinal.TryGetValue(tableOrdinal, out var pageMarketText))
+            {
+                marketText = $"{marketText} {pageMarketText}".Trim();
+            }
             var amountCell = cells[amountColumnIndex.Value];
             var amountText = GetOpenXmlText(amountCell);
             var matches = DollarAmountRegex().Matches(amountText).Cast<Match>().ToList();
@@ -402,7 +414,7 @@ static bool ProcessMatrixTablesInPart(
             foreach (var match in matches)
             {
                 var originalAmount = match.Value;
-                var updatedAmount = CalculateUpdatedAmount(originalAmount, isOneonta);
+                var updatedAmount = CalculateUpdatedAmount(originalAmount, marketText);
                 RecordReplacement(textboxReplacements, ambiguousTextboxAmounts, originalAmount, updatedAmount);
                 cellReplacementCount += ReplaceTextInOpenXmlElement(amountCell, originalAmount, updatedAmount);
             }
@@ -436,6 +448,32 @@ static string GetOpenXmlText(XElement element)
 {
     XNamespace w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
     return string.Concat(element.Descendants(w + "t").Select(node => node.Value));
+}
+
+static IReadOnlyDictionary<int, string> LoadPageMarketTextByOrdinal(string? pageMarketsJsonPath)
+{
+    if (string.IsNullOrWhiteSpace(pageMarketsJsonPath) || !File.Exists(pageMarketsJsonPath))
+    {
+        return new Dictionary<int, string>();
+    }
+
+    try
+    {
+        var rawMap = JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(pageMarketsJsonPath));
+        if (rawMap is null)
+        {
+            return new Dictionary<int, string>();
+        }
+
+        return rawMap
+            .Where(item => int.TryParse(item.Key, out _) && !string.IsNullOrWhiteSpace(item.Value))
+            .ToDictionary(item => int.Parse(item.Key), item => item.Value);
+    }
+    catch (Exception exc)
+    {
+        Console.Error.WriteLine($"Could not read Matrix page-market map {pageMarketsJsonPath}: {exc.Message}");
+        return new Dictionary<int, string>();
+    }
 }
 
 static int ReplaceTextInOpenXmlElement(XElement element, string original, string replacement)
@@ -499,10 +537,15 @@ static void RecordReplacement(
     }
 }
 
-static string CalculateUpdatedAmount(string originalAmount, bool isOneonta)
+static string CalculateUpdatedAmount(string originalAmount, string marketText)
 {
     var parsedValue = ParseDollarAmount(originalAmount);
-    var updatedValue = isOneonta ? parsedValue * 1.3177 : parsedValue / 0.85;
+    var normalizedMarket = marketText ?? string.Empty;
+    var updatedValue = normalizedMarket.Contains("Oneonta", StringComparison.OrdinalIgnoreCase)
+        ? parsedValue * 1.3177
+        : normalizedMarket.Contains("Pensacola", StringComparison.OrdinalIgnoreCase)
+            ? parsedValue * (1108.0 / 950.0)
+            : parsedValue / 0.85;
     var truncatedValue = Math.Abs(updatedValue - Math.Truncate(updatedValue)) > double.Epsilon
         ? Math.Truncate(updatedValue)
         : updatedValue;
@@ -619,7 +662,7 @@ static void PrintUsage()
     Console.Error.WriteLine(
         "Usage:\n" +
         "  MatrixOpenXmlTextboxTool convert-docx-to-pdf --docx <path> --output <pdf-path>\n" +
-        "  MatrixOpenXmlTextboxTool rewrite-matrix-amounts --docx <path>\n" +
+        "  MatrixOpenXmlTextboxTool rewrite-matrix-amounts --docx <path> [--page-markets-json <json-path>]\n" +
         "  MatrixOpenXmlTextboxTool rewrite-textboxes --docx <path> --replacements <json-path>");
 }
 

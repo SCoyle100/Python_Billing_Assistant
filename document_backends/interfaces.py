@@ -19,7 +19,7 @@ class MatrixPageMapper(Protocol):
 
 
 class MatrixDocumentRewriter(Protocol):
-    def rewrite(self, file_path: str) -> None:
+    def rewrite(self, file_path: str, page_market_mapping: dict[int, Any] | None = None) -> None:
         ...
 
 

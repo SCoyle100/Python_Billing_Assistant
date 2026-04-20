@@ -17,7 +17,7 @@ def parse_dollar_amount(dollar_str):
 
 def normalize_cell_text(cell) -> str:
     text = cell.text if cell is not None else ""
-    return text.replace("\r", "").replace("\n", "").strip()
+    return text.replace("\r", "").replace("\n", "").replace("\x07", "").strip()
 
 
 def find_column_indices(table):

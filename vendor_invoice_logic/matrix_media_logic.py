@@ -16,6 +16,7 @@ wdReplaceOne = 1
 wdFindStop = 0
 wdCollapseEnd = 0  # Collapse to end of range
 wdCharacter = 1    # Unit for character movement
+PENSACOLA_MARGIN_MULTIPLIER = 1108.0 / 950.0
 
 def parse_dollar_amount(dollar_str):
     """
@@ -41,10 +42,13 @@ def format_dollar_amount(value):
     return formatted
 
 
-def calculate_updated_amount(original_amount, is_oneonta=False):
+def calculate_updated_amount(original_amount, market_text=""):
     parsed_value = parse_dollar_amount(original_amount)
-    if is_oneonta:
+    normalized_market = str(market_text or "").upper()
+    if "ONEONTA" in normalized_market:
         multiplied_value = parsed_value * 1.3177
+    elif "PENSACOLA" in normalized_market:
+        multiplied_value = parsed_value * PENSACOLA_MARGIN_MULTIPLIER
     else:
         multiplied_value = parsed_value / 0.85
 
@@ -52,6 +56,20 @@ def calculate_updated_amount(original_amount, is_oneonta=False):
         multiplied_value = int(multiplied_value)
 
     return format_dollar_amount(multiplied_value)
+
+
+def get_page_market_text(page_market_mapping, page_num):
+    if not page_market_mapping:
+        return ""
+
+    page_data = page_market_mapping.get(page_num)
+    if not page_data:
+        return ""
+
+    if isinstance(page_data, tuple):
+        return " ".join(str(part or "") for part in page_data)
+
+    return str(page_data or "")
 
 
 def record_textbox_replacement(replacements, ambiguous_amounts, original_amount, updated_amount):
@@ -90,7 +108,7 @@ def run_openxml_textbox_post_pass(file_path, replacements, ambiguous_amounts):
 
 
 
-def analyze_word_document(file_path):
+def analyze_word_document(file_path, page_market_mapping=None):
     # Initialize Word application
     try:
         word = win32com.client.Dispatch("Word.Application")
@@ -172,20 +190,20 @@ def analyze_word_document(file_path):
                     original_amount = match.group(0)
                     # Get market name from current row
                     market_cell_index = None
+                    market_text = ""
                     for col_idx in range(1, num_cols + 1):
                         header_text = table.Cell(1, col_idx).Range.Text.strip()
                         if "Market" in header_text:
                             market_cell_index = col_idx
                             break
-                    
-                    # Apply special margin for Oneonta
-                    is_oneonta_row = bool(
-                        market_cell_index
-                        and "Oneonta" in table.Cell(row_idx, market_cell_index).Range.Text.strip()
-                    )
+
+                    if market_cell_index:
+                        market_text = table.Cell(row_idx, market_cell_index).Range.Text.strip()
+                    page_market_text = get_page_market_text(page_market_mapping, page_num)
+                    market_text = f"{market_text} {page_market_text}".strip()
                     updated_amount = calculate_updated_amount(
                         original_amount,
-                        is_oneonta=is_oneonta_row,
+                        market_text=market_text,
                     )
                     record_textbox_replacement(
                         textbox_replacements,
@@ -250,8 +268,9 @@ def analyze_word_document(file_path):
 
                         for match in matches:
                             original_amount = match.group(0)
-                            # Check if this page's table has any rows with Oneonta market
+                            # Check this page's table market rows for market-specific pricing.
                             market_col_index = None
+                            page_market_text = get_page_market_text(page_market_mapping, page_num)
                             table = page_tables.get(page_num)
                             if table:
                                 for col_idx in range(1, table.Columns.Count + 1):
@@ -260,19 +279,14 @@ def analyze_word_document(file_path):
                                         market_col_index = col_idx
                                         break
                                 
-                                # Look for Oneonta in market column
-                                is_oneonta_page = False
                                 if market_col_index:
                                     for row_idx in range(2, table.Rows.Count + 1):
                                         market_text = table.Cell(row_idx, market_col_index).Range.Text.strip()
-                                        if "Oneonta" in market_text:
-                                            is_oneonta_page = True
-                                            break
-                            
-                            # Apply special margin for Oneonta pages
+                                        page_market_text = f"{page_market_text} {market_text}".strip()
+
                             updated_amount = calculate_updated_amount(
                                 original_amount,
-                                is_oneonta=is_oneonta_page,
+                                market_text=page_market_text,
                             )
                             record_textbox_replacement(
                                 textbox_replacements,

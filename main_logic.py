@@ -18,6 +18,8 @@ import invoice  # Ensure your invoice template module is imported
 from database.database_functions import (
     save_invoices_to_db,
     BATCH_ID,
+    infer_hardcoded_vendor_job_number,
+    normalize_job_number_base,
 
 )
 from document_backends import build_default_document_services
@@ -42,6 +44,8 @@ load_dotenv()
 document_services = build_default_document_services()
 ASSIGNED_SPECIAL_VENDOR_INVOICES = {"Shutterstock": set()}
 BILLING_DATE_TEXT = None
+EMAIL_VENDOR_INVOICE_ROWS = {}
+PREIDENTIFIED_VENDOR_MAP = None
 
 # Import performance decorators and logging config
 from utils.decorators import performance_logger, cache_result, retry
@@ -53,7 +57,7 @@ configure_logging(logs_dir='logs', console_level=logging.INFO, file_level=loggin
 # Initialize Qt Application for dialogs
 app = QApplication(sys.argv)
 
-JOB_NUMBER_PATTERN = r"[A-Za-z]{2,4}[-\s]*\d{2,4}(?:\s*-\s*[A-Za-z])?"
+JOB_NUMBER_PATTERN = r"TTC[-\s]*\d{2,4}(?:\s*-?\s*[A-Za-z])?"
 
 
 def get_default_billing_date_text():
@@ -100,7 +104,7 @@ def normalize_amount_value(amount):
 
 def extract_invoice_suffix_from_job_number(job_number):
     match = re.search(
-        rf"\b([A-Za-z]{{2,4}})\s*-?\s*(\d{{2,4}})\s*-\s*([A-Za-z])\b",
+        rf"\b([A-Za-z]{{2,4}})\s*-?\s*(\d{{2,4}})\s*-?\s*([A-Za-z])\b",
         str(job_number or ""),
         re.IGNORECASE,
     )
@@ -126,14 +130,28 @@ def clean_description_artifacts(text):
     return cleaned.strip()
 
 
-def extract_invoice_info_with_openai(email_body):
+def extract_invoice_info_with_openai(email_body, billing_context="fee"):
+    normalized_context = str(billing_context or "fee").strip()
+    context_instruction = (
+        "Treat the email text as fee billing."
+        if normalized_context == "fee"
+        else (
+            f"Treat the email text as billing instructions for the attached {normalized_context} "
+            "invoice PDF, not as fee billing. Prefer the description and job number from the email. "
+            "For Matrix Media, use the email Total Due as the row amount when it is stated. "
+            "If a job number has a trailing A or B suffix, preserve it in JobNumber."
+        )
+    )
     payload = chat_completion_json(
         system_prompt=(
             "Extract structured invoice rows from email text. "
             "Return a JSON object with one key, 'invoices', whose value is an array of objects. "
             "Each object must use exactly these keys: Description, Amount, JobNumber. "
             "Only include rows that clearly represent invoiceable line items or fee invoices. "
-            "Preserve the description text, keep amount strings as they appear, and leave JobNumber empty when absent."
+            "Preserve the description wording except correct obvious city-name spelling errors in Description "
+            "using the surrounding invoice and vendor context; do not invent cities or change non-city wording. "
+            "Keep amount strings as they appear, and leave JobNumber empty when absent."
+            f" {context_instruction}"
         ),
         user_prompt=f"Email body:\n{email_body}",
         max_tokens=2500,
@@ -240,13 +258,13 @@ def clean_description_from_job_numbers(description):
 
 
 @performance_logger(output_dir='logs/performance')
-def extract_structured_data_from_email(email_body):
+def extract_structured_data_from_email(email_body, billing_context="fee"):
     """
     Use OpenAI chat completions to extract invoice information from the email body.
     Ensure job numbers are extracted and stored separately, and descriptions are clean.
     """
     try:
-        structured_data = extract_invoice_info_with_openai(email_body)
+        structured_data = extract_invoice_info_with_openai(email_body, billing_context=billing_context)
 
         # Process each invoice one by one to handle job number extraction and description cleaning
         extracted_data = []
@@ -354,16 +372,34 @@ def process_selected_eml_file(eml_file_path):
         logging.error("No plain text content found in the email.")
         return
 
-    global BILLING_DATE_TEXT
+    global BILLING_DATE_TEXT, EMAIL_VENDOR_INVOICE_ROWS, PREIDENTIFIED_VENDOR_MAP
     extracted_billing_date = extract_billing_date_from_email(email_body)
     BILLING_DATE_TEXT = extracted_billing_date or get_default_billing_date_text()
+    EMAIL_VENDOR_INVOICE_ROWS = {}
     logging.info("Using billing date text: %s", BILLING_DATE_TEXT)
 
-    # Use OpenAI to extract structured invoice data from the email content
-    extracted_data = extract_structured_data_from_email(email_body)
+    PREIDENTIFIED_VENDOR_MAP = identify_vendors_from_pdfs_in_directory(attachment_dir)
+    vendor_email_sources = sorted(
+        {
+            normalize_billable_attachment_source(vendor)
+            for vendor in PREIDENTIFIED_VENDOR_MAP.values()
+            if normalize_billable_attachment_source(vendor)
+        }
+    )
 
-    # If structured data is found, insert it into the DB before processing PDFs
-    if extracted_data:
+    billing_context = ", ".join(vendor_email_sources) if vendor_email_sources else "fee"
+    extracted_data = extract_structured_data_from_email(email_body, billing_context=billing_context)
+
+    if vendor_email_sources:
+        EMAIL_VENDOR_INVOICE_ROWS = {
+            source: list(extracted_data or [])
+            for source in vendor_email_sources
+        }
+        logging.info(
+            "Email contains Matrix/Capitol attachment(s): %s. Treating email text as vendor billing, not fee billing.",
+            ", ".join(vendor_email_sources),
+        )
+    elif extracted_data:
         save_invoices_to_db(
             invoices = extracted_data,
             batch_id = BATCH_ID,
@@ -372,6 +408,240 @@ def process_selected_eml_file(eml_file_path):
 
     else:
         logging.info("No structured data extracted from email body.")
+
+
+def normalize_billable_attachment_source(vendor_name):
+    normalized = str(vendor_name or "").strip()
+    if normalized == "Matrix Media":
+        return "Matrix Media"
+    if normalized in {"Capitol Hill Media", "Capitol Media"}:
+        return "Capitol Media"
+    return ""
+
+
+def normalize_email_invoice_row(row):
+    values = list(row or [])
+    while len(values) < 4:
+        values.append("")
+
+    return {
+        "description": clean_vendor_email_description(values[0]),
+        "amount": normalize_amount_value(values[1]),
+        "job_number": format_job_number(values[2]),
+        "job_number_raw": str(values[2] or "").strip(),
+        "invoice_suffix": str(values[3] or "").strip(),
+    }
+
+
+def clean_vendor_email_description(description):
+    cleaned = clean_description_artifacts(description)
+    cleaned = cleaned.replace("\u2013", "-").replace("\u2014", "-").replace("\ufffd", "-")
+    cleaned = re.sub(r"\s*,\s*,+\s*", ", ", cleaned)
+    cleaned = re.sub(r"\s+,\s+", " ", cleaned)
+    cleaned = re.sub(r"\s*-\s*,\s*", " - ", cleaned)
+    cleaned = re.sub(r"\s*,\s*$", "", cleaned)
+    cleaned = re.sub(r"^\s*,\s*", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -,:;")
+    return cleaned.upper()
+
+
+MATRIX_EMAIL_MARKET_PATTERNS = [
+    ("Fort Payne", r"\bFORT\s+PAYNE\b|\bFT\.?\s+PAYNE\b|GAULT\s+AVENUE|GALT\s+AVENUE"),
+    ("Pensacola", r"\bPENSACOLA\b|STEWART\s+ST|HWY\s*90"),
+    ("Conyers", r"\bCONYERS\b|EXIT\s*82|\bI\s*20\b"),
+    ("Oneonta", r"\bONEONTA\b|MCCAY\s+AVE|HWY\s*75"),
+    ("Bay Minette", r"\bBAY\s+MINETTE\b|\bMOBILE\b|HWY\s*59|CR\s*-?\s*48"),
+]
+
+
+def identify_matrix_email_market(*parts):
+    text = " ".join(str(part or "") for part in parts).upper()
+    for market, pattern in MATRIX_EMAIL_MARKET_PATTERNS:
+        if re.search(pattern, text, re.IGNORECASE):
+            return market
+    return ""
+
+
+def get_email_invoice_rows_for_source(source):
+    return [
+        normalize_email_invoice_row(row)
+        for row in EMAIL_VENDOR_INVOICE_ROWS.get(source, [])
+    ]
+
+
+def normalize_match_text(value):
+    return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+
+
+def parse_amount_cents(amount):
+    cleaned = normalize_amount_value(amount)
+    if not cleaned:
+        return None
+    try:
+        return int(round(float(cleaned) * 100))
+    except (TypeError, ValueError):
+        return None
+
+
+def warn_matrix_amount_difference(market, service_period, attachment_amount, email_amount):
+    attachment_cents = parse_amount_cents(attachment_amount)
+    email_cents = parse_amount_cents(email_amount)
+    if attachment_cents is None or email_cents is None or attachment_cents == email_cents:
+        return
+
+    warning_message = (
+        f"Matrix email total due '{email_amount}' differs from attachment-derived amount "
+        f"'{attachment_amount}' for market '{market}' service period '{service_period}'. "
+        "Using the email amount on the invoice page and the attachment amount as the backup-image check."
+    )
+    logging.warning(warning_message)
+    print(f"WARNING: {warning_message}")
+
+
+def warn_matrix_job_number_difference(market, hardcoded_job_number, email_row):
+    email_job_number = email_row.get("job_number_raw") if email_row else ""
+    if not hardcoded_job_number or not email_job_number:
+        return
+
+    if normalize_job_number_base(hardcoded_job_number) == normalize_job_number_base(email_job_number):
+        return
+
+    warning_message = (
+        f"Matrix email job number '{email_job_number}' differs from hardcoded job number "
+        f"'{hardcoded_job_number}' for market '{market}'. Using hardcoded job number."
+    )
+    logging.warning(warning_message)
+    print(f"WARNING: {warning_message}")
+
+
+def apply_matrix_email_overrides(invoices_list):
+    email_rows = get_email_invoice_rows_for_source("Matrix Media")
+    if not email_rows:
+        return invoices_list
+
+    email_rows_by_market = {}
+    for email_index, row in enumerate(email_rows):
+        market_key = identify_matrix_email_market(row["description"])
+        if market_key:
+            email_rows_by_market.setdefault(market_key, []).append((email_index, row))
+
+    merged_invoices = []
+    used_email_indexes = set()
+    for index, invoice_item in enumerate(invoices_list):
+        values = list(invoice_item)
+        while len(values) < 4:
+            values.append("")
+
+        market, attachment_amount, service_period, attachment_description = values[:4]
+        market_key = identify_matrix_email_market(market, attachment_description) or str(market or "").strip()
+        candidate_rows = email_rows_by_market.get(market_key, [])
+        email_row = None
+        normalized_service_period = normalize_match_text(service_period)
+        if normalized_service_period:
+            for candidate_index, candidate in candidate_rows:
+                if candidate_index in used_email_indexes:
+                    continue
+                if normalized_service_period in normalize_match_text(candidate["description"]):
+                    email_row = candidate
+                    used_email_indexes.add(candidate_index)
+                    break
+
+        if not email_row:
+            for candidate_index, candidate in candidate_rows:
+                if candidate_index not in used_email_indexes:
+                    email_row = candidate
+                    used_email_indexes.add(candidate_index)
+                    break
+
+        if not email_row and len(email_rows) == len(invoices_list) and index not in used_email_indexes:
+            email_row = email_rows[index]
+            used_email_indexes.add(index)
+        elif not email_row and len(email_rows) == 1 and len(invoices_list) == 1:
+            email_row = email_rows[0]
+            used_email_indexes.add(0)
+
+        if not email_row:
+            merged_invoices.append(invoice_item)
+            continue
+
+        hardcoded_job_number = infer_hardcoded_vendor_job_number(
+            "Matrix Media",
+            market,
+            service_period,
+            attachment_description,
+        )
+        warn_matrix_job_number_difference(market, hardcoded_job_number, email_row)
+
+        email_amount = email_row.get("amount") or attachment_amount
+        email_description = email_row.get("description") or attachment_description
+        warn_matrix_amount_difference(market, service_period, attachment_amount, email_amount)
+        logging.info(
+            "Matrix email override for %s: attachment amount=%s, email amount=%s, "
+            "attachment description=%r, email description=%r",
+            market,
+            attachment_amount,
+            email_amount,
+            attachment_description,
+            email_description,
+        )
+        merged_invoices.append(
+            (
+                market,
+                email_amount,
+                service_period,
+                email_description,
+                email_row.get("job_number", ""),
+                email_row.get("invoice_suffix", ""),
+            )
+        )
+
+    return merged_invoices
+
+
+def select_capitol_email_row(market, email_rows):
+    if not email_rows:
+        return None
+    if len(email_rows) == 1:
+        return email_rows[0]
+
+    market_text = str(market or "").upper()
+    for row in email_rows:
+        if market_text and market_text in row["description"].upper():
+            return row
+    return email_rows[0]
+
+
+def apply_capitol_email_overrides(invoices_list):
+    email_rows = get_email_invoice_rows_for_source("Capitol Media")
+    if not email_rows:
+        return invoices_list
+
+    merged_invoices = []
+    for invoice_item in invoices_list:
+        values = list(invoice_item)
+        while len(values) < 2:
+            values.append("")
+
+        market, attachment_amount = values[:2]
+        email_row = select_capitol_email_row(market, email_rows)
+        if not email_row:
+            merged_invoices.append(invoice_item)
+            continue
+
+        # Keep Capitol attachment math as the authority for amounts, but use the
+        # email's job number and description when present.
+        merged_invoices.append(
+            (
+                market,
+                attachment_amount,
+                "",
+                email_row.get("description", ""),
+                email_row.get("job_number", ""),
+                email_row.get("invoice_suffix", ""),
+            )
+        )
+
+    return merged_invoices
 
 
 def _sanitize_filename_component(value):
@@ -550,9 +820,14 @@ def process_all_pdfs_in_directory():
     before processing.
     """
     directory = "downloaded files email"
-    
+
     # Identify vendors for all PDFs in the directory
-    vendor_map = identify_vendors_from_pdfs_in_directory(directory)
+    global PREIDENTIFIED_VENDOR_MAP
+    if PREIDENTIFIED_VENDOR_MAP is not None:
+        vendor_map = dict(PREIDENTIFIED_VENDOR_MAP)
+        logging.info("Using vendor map identified during email parsing: %s", vendor_map)
+    else:
+        vendor_map = identify_vendors_from_pdfs_in_directory(directory)
     
     # If there are multiple Matrix Media PDFs, combine them into a single PDF
     matrix_media_files = [fname for fname, vendor in vendor_map.items() 
@@ -625,7 +900,10 @@ def handle_vendor_identification(pdf_file_path, vendor_map=None):
                 source_pdf_path=pdf_file_path,
             )
             # Apply the matrix media logic to update dollar amounts in the Word document
-            document_services.matrix.document_rewriter.rewrite(docx_file_path)
+            document_services.matrix.document_rewriter.rewrite(
+                docx_file_path,
+                page_market_mapping=page_to_market,
+            )
             
             # Extract invoice data into a DataFrame
             df_invoices = document_services.matrix.dataframe_builder.build(docx_file_path)
@@ -643,6 +921,7 @@ def handle_vendor_identification(pdf_file_path, vendor_map=None):
                 
             # Convert DataFrame rows to tuples with available columns
             invoices_list = list(df_invoices[columns_to_include].itertuples(index=False, name=None))
+            invoices_list = apply_matrix_email_overrides(invoices_list)
             
             print("DEBUG: Invoice list before saving to DB:")
             for invoice_tuple in invoices_list:
@@ -728,6 +1007,7 @@ def handle_vendor_identification(pdf_file_path, vendor_map=None):
                 invoices_list = list(
                 df_invoices[['Market', 'Amount']].itertuples(index=False, name=None)
                 )
+                invoices_list = apply_capitol_email_overrides(invoices_list)
 
             if invoices_list:
                 document_services.capitol.table_rebuilder.rebuild(docx_file_path, invoices_list)
@@ -758,7 +1038,7 @@ def handle_vendor_identification(pdf_file_path, vendor_map=None):
                 invoices=invoices_list,
                 batch_id=BATCH_ID,
                 source="Capitol Media",
-                #docx_file_path=docx_file_path
+                docx_file_path=docx_file_path
             )
             images = document_services.rendering.docx_to_images.generate(
                 docx_file_path,
@@ -962,7 +1242,7 @@ def create_word_document():
         # If service period is available, append it in parentheses
         if description and description.strip() and market and market.strip():
             # If description doesn't already start with the market name
-            if not description.strip().startswith(market.strip()):
+            if not description.strip().upper().startswith(market.strip().upper()):
                 display_text = f"{market} - {description}"
             else:
                 display_text = description
@@ -973,7 +1253,7 @@ def create_word_document():
         # Remove TTC numbers from the display text before adding service period
         # This handles cases where TTC numbers are still appearing in descriptions
         # Very specific pattern for (TTC-350) format
-        display_text = clean_description_artifacts(display_text)
+        display_text = clean_vendor_email_description(display_text)
         
         # Add service period in parentheses if available
         if service_period and service_period.strip():

@@ -116,15 +116,15 @@ class FallbackMatrixPageMapper(MatrixPageMapper):
 
 
 class WordComMatrixDocumentRewriter(MatrixDocumentRewriter):
-    def rewrite(self, file_path: str) -> None:
+    def rewrite(self, file_path: str, page_market_mapping: dict[int, Any] | None = None) -> None:
         from vendor_invoice_logic.matrix_media_logic import analyze_word_document
 
-        analyze_word_document(file_path)
+        analyze_word_document(file_path, page_market_mapping=page_market_mapping)
 
 
 class DotNetMatrixDocumentRewriter(MatrixDocumentRewriter):
-    def rewrite(self, file_path: str) -> None:
-        if not rewrite_matrix_amounts_with_dotnet(file_path):
+    def rewrite(self, file_path: str, page_market_mapping: dict[int, Any] | None = None) -> None:
+        if not rewrite_matrix_amounts_with_dotnet(file_path, page_market_mapping=page_market_mapping):
             raise RuntimeError(f".NET Matrix document rewriter failed for {file_path}")
 
 
@@ -133,13 +133,13 @@ class FallbackMatrixDocumentRewriter(MatrixDocumentRewriter):
     primary: MatrixDocumentRewriter
     fallback: MatrixDocumentRewriter
 
-    def rewrite(self, file_path: str) -> None:
+    def rewrite(self, file_path: str, page_market_mapping: dict[int, Any] | None = None) -> None:
         if os.getenv("MATRIX_REWRITER", "").lower() == "word":
-            self.fallback.rewrite(file_path)
+            self.fallback.rewrite(file_path, page_market_mapping=page_market_mapping)
             return
 
         try:
-            self.primary.rewrite(file_path)
+            self.primary.rewrite(file_path, page_market_mapping=page_market_mapping)
             logger.info(
                 "Matrix document rewriter used primary backend %s for %s",
                 type(self.primary).__name__,
@@ -155,7 +155,7 @@ class FallbackMatrixDocumentRewriter(MatrixDocumentRewriter):
                 type(self.fallback).__name__,
             )
 
-        self.fallback.rewrite(file_path)
+        self.fallback.rewrite(file_path, page_market_mapping=page_market_mapping)
 
 
 @dataclass
