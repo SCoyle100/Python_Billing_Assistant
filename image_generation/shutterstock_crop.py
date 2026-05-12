@@ -12,7 +12,10 @@ import fitz                     # PyMuPDF
 import cv2
 import numpy as np
 from PIL import Image
-from tkinter import Tk, filedialog, messagebox
+try:
+    from tkinter import Tk, filedialog, messagebox
+except ImportError:
+    Tk = filedialog = messagebox = None
 from pathlib import Path
 import os
 

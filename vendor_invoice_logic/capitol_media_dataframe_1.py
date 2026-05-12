@@ -3,7 +3,10 @@
 import sys
 import re
 import pandas as pd
-import win32com.client
+try:
+    import win32com.client
+except ImportError:
+    win32com = None
 from docx import Document as DocxDocument
 
 from utils.openai_json import chat_completion_json

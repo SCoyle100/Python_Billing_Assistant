@@ -81,18 +81,25 @@ if __name__ == "__main__":
 
 
 import sys
-from PyQt5.QtWidgets import QApplication, QMessageBox, QFileDialog
 import os
 import fitz  # PyMuPDF
 import logging
 from PIL import Image, ImageDraw
 Image.MAX_IMAGE_PIXELS = None
 
+try:
+    from PyQt5.QtWidgets import QApplication, QMessageBox, QFileDialog
+except ImportError:
+    QApplication = QMessageBox = QFileDialog = None
+
 
 logging.basicConfig(level=logging.DEBUG)
 
 # Function to get the path of the PDF file from the user
 def select_pdf_file():
+    if QFileDialog is None:
+        raise RuntimeError("PyQt5 is not installed; pass a PDF path directly to convert_pdf_to_images.")
+
     file_dialog = QFileDialog()
     file_dialog.setNameFilter("PDF Files (*.pdf)")
     file_dialog.setFileMode(QFileDialog.ExistingFile)
@@ -122,7 +129,7 @@ def resize_image_with_physical_size(image_path, target_width_in_inches=12, targe
         target_height_px = int(target_height_in_inches * dpi)
 
         # Resize the image to the target pixel dimensions
-        img = img.resize((target_width_px, target_height_px), Image.ANTIALIAS)
+        img = img.resize((target_width_px, target_height_px), Image.Resampling.LANCZOS)
 
 
         # Set DPI metadata
@@ -162,6 +169,9 @@ def convert_pdf_to_images(pdf_path, dpi=300):
     return image_paths
 
 def main():
+    if QApplication is None:
+        raise RuntimeError("PyQt5 is not installed; use convert_pdf_to_images(pdf_path) from code.")
+
     # Initialize the QApplication
     app = QApplication(sys.argv)
 

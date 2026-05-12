@@ -3,7 +3,10 @@ import os
 import fitz  # PyMuPDF
 import logging
 from PIL import Image
-import win32com.client as win32
+try:
+    import win32com.client as win32
+except ImportError:
+    win32 = None
 from utils.decorators import performance_logger
 
 logging.basicConfig(level=logging.DEBUG)
@@ -11,6 +14,10 @@ logging.basicConfig(level=logging.DEBUG)
 @performance_logger(output_dir='logs')
 def create_pdf_from_docx(docx_path):
     try:
+        if win32 is None:
+            logging.error("win32com is not available; cannot create PDF from DOCX in this environment.")
+            return None
+
         normalized_path = os.path.normpath(docx_path)
         pdf_path = os.path.splitext(normalized_path)[0] + ".pdf"
         

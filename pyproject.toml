@@ -1,0 +1,18 @@
+[project]
+name = "billing-pdf-automation"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.4.4",
+    "openai>=2.36.0",
+    "opencv-python>=4.13.0.92",
+    "pandas>=3.0.3",
+    "pdfservices-sdk>=4.2.0",
+    "pillow>=12.2.0",
+    "pymupdf>=1.27.2.3",
+    "pypdf2>=3.0.1",
+    "pytesseract>=0.3.13",
+    "python-docx>=1.2.0",
+    "python-dotenv>=1.2.2",
+    "pywin32>=311 ; sys_platform == 'win32'",
+]

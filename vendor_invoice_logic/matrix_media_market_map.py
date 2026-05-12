@@ -1,4 +1,7 @@
-import win32com.client
+try:
+    import win32com.client
+except ImportError:
+    win32com = None
 import re
 import logging
 

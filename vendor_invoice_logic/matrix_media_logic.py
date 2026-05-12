@@ -1,4 +1,7 @@
-import win32com.client
+try:
+    import win32com.client
+except ImportError:
+    win32com = None
 import re
 import sys
 
@@ -34,6 +37,53 @@ def format_dollar_amount(value):
     return formatted
 
 
+def normalize_amount_override_value(value):
+    cleaned = str(value or "").replace("$", "").replace(",", "").strip()
+    if not cleaned:
+        return ""
+
+    try:
+        return format_dollar_amount(float(cleaned))
+    except ValueError:
+        return str(value or "").strip()
+
+
+def normalize_override_match_text(value):
+    return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+
+
+def find_amount_override(amount_overrides, page_num, market_text=""):
+    if not amount_overrides:
+        return ""
+
+    page_key = str(page_num)
+    page_overrides = amount_overrides.get(page_num) or amount_overrides.get(page_key) or []
+    searchable_market = normalize_override_match_text(market_text)
+
+    for override in page_overrides:
+        if not isinstance(override, dict):
+            continue
+
+        override_amount = normalize_amount_override_value(override.get("amount"))
+        if not override_amount:
+            continue
+
+        override_market = normalize_override_match_text(override.get("market"))
+        override_description = normalize_override_match_text(override.get("description"))
+
+        if not override_market and not override_description:
+            return override_amount
+
+        if override_market and override_market in searchable_market:
+            return override_amount
+        if override_description and override_description in searchable_market:
+            return override_amount
+        if searchable_market and override_market and searchable_market in override_market:
+            return override_amount
+
+    return ""
+
+
 def calculate_updated_amount(original_amount, market_text=""):
     parsed_value = parse_dollar_amount(original_amount)
     normalized_market = str(market_text or "").upper()
@@ -65,7 +115,7 @@ def get_page_market_text(page_market_mapping, page_num):
     return str(page_data or "")
 
 
-def analyze_word_document(file_path, page_market_mapping=None):
+def analyze_word_document(file_path, page_market_mapping=None, amount_overrides=None):
     # Initialize Word application
     word = win32com.client.Dispatch("Word.Application")
     word.Visible = False  # Change to True for debugging
@@ -139,7 +189,11 @@ def analyze_word_document(file_path, page_market_mapping=None):
                         market_text = table.Cell(row_idx, market_cell_index).Range.Text.strip()
                     page_market_text = get_page_market_text(page_market_mapping, page_num)
                     market_text = f"{market_text} {page_market_text}".strip()
-                    updated_amount = calculate_updated_amount(original_amount, market_text)
+                    updated_amount = find_amount_override(
+                        amount_overrides,
+                        page_num,
+                        market_text,
+                    ) or calculate_updated_amount(original_amount, market_text)
 
                     # Use Word's Find/Replace with wildcard matching
                     find = cell_range.Find
@@ -214,7 +268,11 @@ def analyze_word_document(file_path, page_market_mapping=None):
                                         market_text = table.Cell(row_idx, market_col_index).Range.Text.strip()
                                         page_market_text = f"{page_market_text} {market_text}".strip()
 
-                            updated_amount = calculate_updated_amount(original_amount, page_market_text)
+                            updated_amount = find_amount_override(
+                                amount_overrides,
+                                page_num,
+                                page_market_text,
+                            ) or calculate_updated_amount(original_amount, page_market_text)
 
                             # Find and replace in shape text
                             find = text_range.Find

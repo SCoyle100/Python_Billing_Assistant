@@ -6,7 +6,11 @@ import sqlite3
 import datetime  # For generating batch IDs
 import fitz
 from dotenv import load_dotenv
-from PyQt5.QtWidgets import QApplication, QFileDialog, QInputDialog
+try:
+    import tkinter as tk
+    from tkinter import filedialog as tk_filedialog
+except ImportError:
+    tk = tk_filedialog = None
 from email import policy
 from email.parser import BytesParser
 import docx
@@ -73,9 +77,6 @@ from utils.logging_config import configure_logging
 
 # Configure logging with timestamped files
 configure_logging(logs_dir='logs', console_level=logging.INFO, file_level=logging.DEBUG)
-
-# Initialize Qt Application for dialogs
-app = QApplication(sys.argv)
 
 JOB_NUMBER_PATTERN = r"TTC[-\s]*\d{2,4}(?:\s*-?\s*[A-Za-z])?"
 
@@ -342,11 +343,22 @@ def extract_structured_data_from_email(email_body, billing_context="fee"):
 
 
 def select_eml_file():
-    options = QFileDialog.Options()
-    options |= QFileDialog.ReadOnly
-    file_path, _ = QFileDialog.getOpenFileName(None, "Select an EML File", "", 
-                                               "Email Files (*.eml);;All Files (*)", 
-                                               options=options)
+    if tk_filedialog is None:
+        raise RuntimeError(
+            "tkinter is not available; install Python with tkinter support or pass an EML path to "
+            "process_selected_eml_file instead."
+        )
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        file_path = tk_filedialog.askopenfilename(
+            title="Select an EML File",
+            filetypes=[("Email Files", "*.eml"), ("All Files", "*.*")],
+        )
+    finally:
+        root.destroy()
+
     if file_path:
         process_selected_eml_file(file_path)
     else:
@@ -512,7 +524,7 @@ def warn_matrix_amount_difference(market, service_period, attachment_amount, ema
     warning_message = (
         f"Matrix email total due '{email_amount}' differs from attachment-derived amount "
         f"'{attachment_amount}' for market '{market}' service period '{service_period}'. "
-        "Using the email amount on the invoice page and the attachment amount as the backup-image check."
+        "Using the email amount on the invoice page and Matrix backup image."
     )
     logging.warning(warning_message)
     print(f"WARNING: {warning_message}")
@@ -616,6 +628,71 @@ def apply_matrix_email_overrides(invoices_list):
         )
 
     return merged_invoices
+
+
+def build_matrix_amount_overrides(page_market_mapping):
+    email_rows = get_email_invoice_rows_for_source("Matrix Media")
+    if not email_rows or not page_market_mapping:
+        return {}
+
+    email_rows_by_market = {}
+    for email_index, row in enumerate(email_rows):
+        market_key = identify_matrix_email_market(row["description"])
+        if market_key:
+            email_rows_by_market.setdefault(market_key, []).append((email_index, row))
+
+    amount_overrides = {}
+    used_email_indexes = set()
+    for page_num, page_data in page_market_mapping.items():
+        if isinstance(page_data, tuple) and len(page_data) == 2:
+            market, service_period = page_data
+        else:
+            market, service_period = page_data, ""
+
+        market_key = identify_matrix_email_market(market, service_period) or str(market or "").strip()
+        candidate_rows = email_rows_by_market.get(market_key, [])
+        email_row = None
+        normalized_service_period = normalize_match_text(service_period)
+
+        if normalized_service_period:
+            for candidate_index, candidate in candidate_rows:
+                if candidate_index in used_email_indexes:
+                    continue
+                if normalized_service_period in normalize_match_text(candidate["description"]):
+                    email_row = candidate
+                    used_email_indexes.add(candidate_index)
+                    break
+
+        if not email_row:
+            for candidate_index, candidate in candidate_rows:
+                if candidate_index not in used_email_indexes:
+                    email_row = candidate
+                    used_email_indexes.add(candidate_index)
+                    break
+
+        if not email_row:
+            continue
+
+        email_amount = email_row.get("amount")
+        if not email_amount:
+            continue
+
+        amount_overrides.setdefault(page_num, []).append(
+            {
+                "market": market_key,
+                "description": email_row.get("description", ""),
+                "amount": email_amount,
+            }
+        )
+        logging.info(
+            "Matrix backup amount override for page %s (%s, %s): %s",
+            page_num,
+            market,
+            service_period,
+            email_amount,
+        )
+
+    return amount_overrides
 
 
 def select_capitol_email_row(market, email_rows):
@@ -914,8 +991,13 @@ def handle_vendor_identification(pdf_file_path, vendor_map=None):
             print(f"Executing script for {base_name}, vendor is Matrix Media...")
             docx_file_path = converter.convert_pdf_to_docx(pdf_file_path)
             page_to_market = read_page_markets(docx_file_path)
+            matrix_amount_overrides = build_matrix_amount_overrides(page_to_market)
             # Apply the matrix media logic to update dollar amounts in the Word document
-            analyze_word_document(docx_file_path, page_market_mapping=page_to_market)
+            analyze_word_document(
+                docx_file_path,
+                page_market_mapping=page_to_market,
+                amount_overrides=matrix_amount_overrides,
+            )
             
             # Extract invoice data into a DataFrame
             df_invoices = build_dataframe_from_word_document(docx_file_path)

@@ -21,8 +21,14 @@ from adobe.pdfservices.operation.pdfjobs.result.export_pdf_result import ExportP
 from adobe.pdfservices.operation.pdfjobs.jobs.create_pdf_job import CreatePDFJob
 from adobe.pdfservices.operation.pdfjobs.result.create_pdf_result import CreatePDFResult
 from openai import OpenAI
-from PyQt5.QtWidgets import QFileDialog, QApplication, QMessageBox
-import win32com.client as win32
+try:
+    from PyQt5.QtWidgets import QFileDialog, QApplication, QMessageBox
+except ImportError:
+    QFileDialog = QApplication = QMessageBox = None
+try:
+    import win32com.client as win32
+except ImportError:
+    win32 = None
 
 # Import utils
 try:

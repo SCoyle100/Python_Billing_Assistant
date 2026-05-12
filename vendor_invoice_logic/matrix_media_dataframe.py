@@ -1,7 +1,10 @@
 import sys
 import re
 import pandas as pd
-import win32com.client
+try:
+    import win32com.client
+except ImportError:
+    win32com = None
 
 
 
