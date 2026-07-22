@@ -59,7 +59,8 @@ def analyze_vendor_with_openai(image_path):
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-5.6-terra",
+            reasoning_effort="none",
             messages=[
                 {
                     "role": "user",
@@ -78,7 +79,7 @@ def analyze_vendor_with_openai(image_path):
                     ],
                 }
             ],
-            max_tokens=500,
+            max_completion_tokens=500,
         )
 
         # We expect the model to return a single vendor name (text-based).

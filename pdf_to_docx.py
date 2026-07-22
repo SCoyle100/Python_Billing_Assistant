@@ -139,7 +139,8 @@ def read_word_file(docx_path):
 def get_gpt_response(user_input):
     client = OpenAI()
     response = client.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-5.6-terra",
+        reasoning_effort="none",
         messages=[
             {"role": "system", "content": "You are here to help extract data from tables."},
             {"role": "user", "content": user_input}
@@ -325,4 +326,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

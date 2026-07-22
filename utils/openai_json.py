@@ -22,13 +22,13 @@ def chat_completion_json(
     *,
     model=None,
     temperature=0.0,
-    max_tokens=2000,
+    max_completion_tokens=2000,
     retries=3,
 ):
     """
     Call the OpenAI Chat Completions API and parse a JSON object response.
     """
-    selected_model = model or os.getenv("OPENAI_CHAT_MODEL", "gpt-4o")
+    selected_model = model or os.getenv("OPENAI_CHAT_MODEL", "gpt-5.6-terra")
     client = OpenAI()
     last_error = None
 
@@ -39,18 +39,22 @@ def chat_completion_json(
 
     for attempt in range(1, retries + 1):
         try:
-            response = client.chat.completions.create(
-                model=selected_model,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                messages=[
+            request_options = {
+                "model": selected_model,
+                "temperature": temperature,
+                "max_completion_tokens": max_completion_tokens,
+                "messages": [
                     {
                         "role": "system",
                         "content": f"{system_prompt}\n\n{json_instruction}",
                     },
                     {"role": "user", "content": user_prompt},
                 ],
-            )
+            }
+            if selected_model.startswith("gpt-5.6"):
+                request_options["reasoning_effort"] = "none"
+
+            response = client.chat.completions.create(**request_options)
             content = response.choices[0].message.content or "{}"
             return json.loads(_strip_json_fences(content))
         except Exception as exc:

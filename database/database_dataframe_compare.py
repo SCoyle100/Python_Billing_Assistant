@@ -22,7 +22,7 @@ def compare_dataframe_to_database(dataframe_records, database_records):
             f"DataFrame records:\n{dataframe_records}\n\n"
             f"Database records:\n{database_records}"
         ),
-        max_tokens=2500,
+        max_completion_tokens=2500,
     )
 
 
@@ -37,7 +37,7 @@ def compare_dataframes_for_margin(df_transformed, df_original):
             f"Transformed records:\n{df_transformed}\n\n"
             f"Original records:\n{df_original}"
         ),
-        max_tokens=2000,
+        max_completion_tokens=2000,
     )
 
 

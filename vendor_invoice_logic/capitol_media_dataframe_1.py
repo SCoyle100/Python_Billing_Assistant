@@ -226,7 +226,7 @@ def identify_invoice_table_with_openai(table_text):
             "Return a JSON object with keys: has_invoice_data (boolean), confidence (High, Medium, or Low)."
         ),
         user_prompt=f"Table text:\n{table_text}",
-        max_tokens=400,
+        max_completion_tokens=400,
     )
     return {
         "has_invoice_data": bool(payload.get("has_invoice_data")),
@@ -246,10 +246,13 @@ def extract_capitol_media_rows_with_openai(table_text):
             "The table may begin with one or two descriptive lines before the market rows start; those belong to the "
             "intro section and must not be included in invoices. "
             "If a line mixes a market name with discount text, keep only the market name. "
-            "If the first positive amount corresponds to the first actual market after an intro section, output just the market name."
+            "If the first positive amount corresponds to the first actual market after an intro section, output just the market name. "
+            "Correct only obvious spelling errors in human-readable Description text, especially city and market "
+            "names, when the intended spelling is clear from context. Do not alter amounts, dates, invoice numbers, "
+            "job numbers, other identifiers, proper names, or ambiguous wording."
         ),
         user_prompt=f"Table text:\n{table_text}",
-        max_tokens=2500,
+        max_completion_tokens=2500,
     )
     invoices = payload.get("invoices", [])
     if not isinstance(invoices, list):

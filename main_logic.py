@@ -169,13 +169,17 @@ def extract_invoice_info_with_openai(email_body, billing_context="fee"):
             "Return a JSON object with one key, 'invoices', whose value is an array of objects. "
             "Each object must use exactly these keys: Description, Amount, JobNumber. "
             "Only include rows that clearly represent invoiceable line items or fee invoices. "
-            "Preserve the description wording except correct obvious city-name spelling errors in Description "
-            "using the surrounding invoice and vendor context; do not invent cities or change non-city wording. "
+            "Correct only obvious spelling errors in human-readable Description text, especially city and market "
+            "names, when the intended spelling is clear from the surrounding invoice and vendor context. "
+            "Otherwise preserve the Description wording, punctuation, abbreviations, route text, and "
+            "service-period text, but normalize all letters in Description to uppercase. "
+            "Do not alter vendor names, amounts, dates, invoice numbers, job numbers, other identifiers, or "
+            "ambiguous wording. "
             "Keep amount strings as they appear, and leave JobNumber empty when absent."
             f" {context_instruction}"
         ),
         user_prompt=f"Email body:\n{email_body}",
-        max_tokens=2500,
+        max_completion_tokens=2500,
     )
     invoices = payload.get("invoices", [])
     if not isinstance(invoices, list):
@@ -290,7 +294,7 @@ def extract_structured_data_from_email(email_body, billing_context="fee"):
         # Process each invoice one by one to handle job number extraction and description cleaning
         extracted_data = []
         for invoice in structured_data:
-            original_description = invoice.get("Description", "").upper()
+            original_description = str(invoice.get("Description", "") or "").upper()
             description = clean_description_artifacts(original_description)
             
             amount = normalize_amount_value(invoice.get("Amount", ""))
@@ -483,6 +487,7 @@ MATRIX_EMAIL_MARKET_PATTERNS = [
     ("Conyers", r"\bCONYERS\b|EXIT\s*82|\bI\s*20\b"),
     ("Oneonta", r"\bONEONTA\b|MCCAY\s+AVE|HWY\s*75"),
     ("Bay Minette", r"\bBAY\s+MINETTE\b|\bMOBILE\b|HWY\s*59|CR\s*-?\s*48"),
+    ("Troy, AL", r"\bTROY\b|HWY\s*231|HWY\s*167"),
 ]
 
 
@@ -513,6 +518,16 @@ def parse_amount_cents(amount):
         return int(round(float(cleaned) * 100))
     except (TypeError, ValueError):
         return None
+
+
+def append_service_period_if_missing(description, service_period):
+    display_text = str(description or "").strip()
+    period_text = str(service_period or "").strip()
+    if not period_text or period_text.lower() == "nan":
+        return display_text
+    if normalize_match_text(period_text) in normalize_match_text(display_text):
+        return display_text
+    return f"{display_text} ({period_text})"
 
 
 def warn_matrix_amount_difference(market, service_period, attachment_amount, email_amount):
@@ -585,10 +600,16 @@ def apply_matrix_email_overrides(invoices_list):
                     used_email_indexes.add(candidate_index)
                     break
 
-        if not email_row and len(email_rows) == len(invoices_list) and index not in used_email_indexes:
-            email_row = email_rows[index]
-            used_email_indexes.add(index)
-        elif not email_row and len(email_rows) == 1 and len(invoices_list) == 1:
+        if not email_row and normalized_service_period:
+            for candidate_index, candidate in enumerate(email_rows):
+                if candidate_index in used_email_indexes:
+                    continue
+                if normalized_service_period in normalize_match_text(candidate["description"]):
+                    email_row = candidate
+                    used_email_indexes.add(candidate_index)
+                    break
+
+        if not email_row and len(email_rows) == 1 and len(invoices_list) == 1:
             email_row = email_rows[0]
             used_email_indexes.add(0)
 
@@ -1345,8 +1366,7 @@ def create_word_document():
         display_text = clean_vendor_email_description(display_text)
         
         # Add service period in parentheses if available
-        if service_period and service_period.strip():
-            display_text = f"{display_text} ({service_period})"
+        display_text = append_service_period_if_missing(display_text, service_period)
         
         # IMPORTANT: Don't append job number to description - it's handled separately in <<job>> placeholder
             
@@ -1524,12 +1544,10 @@ def create_word_document():
                 description = ""
                 job_number = ""
                 
-            # Clean TTC numbers from description right after unpacking from database
+            # Clean TTC job numbers without treating route identifiers such as
+            # HWY 59, CR-48, or HWY 231 as job numbers.
             if description:
-                description = re.sub(r'\s*\([A-Za-z]{2,4}[-\s]*\d{2,4}\)\s*', ' ', str(description), flags=re.IGNORECASE)
-                description = re.sub(r'\s*[A-Za-z]{2,4}[-\s]*\d{2,4}\s*$', '', description, flags=re.IGNORECASE)
-                description = re.sub(r'\b[A-Za-z]{2,4}[-\s]*\d{2,4}\b', '', description, flags=re.IGNORECASE)
-                description = re.sub(r'\s+', ' ', description).strip()
+                description = clean_description_from_job_numbers(str(description))
                 
             log_msg = f"Adding invoice: {invoice_no}, market: {market}, amount: {amount}, service_period: {service_period}"
             if job_number:

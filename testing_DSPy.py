@@ -38,7 +38,7 @@ def get_user_date():
 desired_date_format = get_user_date()
 
 # Configure DSPy with your OpenAI API key
-dspy.configure(lm=dspy.LM('openai/gpt-4o'))
+dspy.configure(lm=dspy.LM('openai/gpt-5.6-terra', reasoning_effort='none'))
 
 
 def refine_city_name(market):

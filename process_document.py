@@ -87,7 +87,8 @@ def read_word_file(docx_path):
 
 def get_gpt_response(user_input):
     response = client.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-5.6-terra",
+        reasoning_effort="none",
         messages=[
             {"role": "system", "content": "You are here to help extract data from tables."},
             {"role": "user", "content": user_input}
@@ -97,7 +98,7 @@ def get_gpt_response(user_input):
 
 def extract_data_with_openai(table_data):
     prompt = (
-        "Extract the descriptions and their corresponding amounts from the table with pricing. Exclude any rows where the description is a general statement or does not directly correspond to an amount. The descriptions should not be long or complicated.  You should only look for the simple ones, such as a city name and the state abreviation.  Short, brief descriptions.  If there are no brief descriptions, then just use what makes sense.  Also, in the amounts column, if there are 2 items, and the descriptions column has like a long description of cities and dates and stuff, but then there is also just city name and state abbreviations, and there are 2 of them? There you go, we need that.  Simple descriptions correlating with the amounts:\n"
+        "Extract the descriptions and their corresponding amounts from the table with pricing. Exclude any rows where the description is a general statement or does not directly correspond to an amount. The descriptions should not be long or complicated.  You should only look for the simple ones, such as a city name and the state abbreviation.  Short, brief descriptions.  If there are no brief descriptions, then just use what makes sense.  Also, in the amounts column, if there are 2 items, and the descriptions column has like a long description of cities and dates and stuff, but then there is also just city name and state abbreviations, and there are 2 of them? There you go, we need that.  Simple descriptions correlating with the amounts. Correct only obvious spelling errors in human-readable descriptions when the intended spelling is clear from context; never alter amounts, dates, invoice numbers, job numbers, vendor names, other identifiers, or ambiguous wording:\n"
         f"{table_data}\n"
         "Return only the list of tuples. Do not say anything else, just provide the list of tuples because your output is going to be read by a python script into a tuple. "
     )
@@ -222,7 +223,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
 
 

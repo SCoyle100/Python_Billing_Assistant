@@ -18,7 +18,8 @@ def analyze_image_with_openai(image_path):
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-5.6-terra",
+            reasoning_effort="none",
             messages=[{
                 "role": "user",
                 "content": [
@@ -35,7 +36,7 @@ def analyze_image_with_openai(image_path):
                     },
                 ],
             }],
-            max_tokens=1000,
+            max_completion_tokens=1000,
         )
 
         result = response.choices[0].message.content

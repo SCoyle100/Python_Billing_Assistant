@@ -108,7 +108,8 @@ def process_selected_word_document(file_path):
 
 def get_gpt_response(user_input):
     response = client.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-5.6-terra",
+        reasoning_effort="none",
         messages=[
             {"role": "system", "content": "You are here to help extract data from tables."},
             {"role": "user", "content": user_input}
@@ -118,7 +119,10 @@ def get_gpt_response(user_input):
 
 def extract_data_with_openai(table_data):
     prompt = (
-        "Extract the description and amounts column from the main table.  Start the search starting at the word Description:\n"
+        "Extract the description and amounts column from the main table. Start the search at the word Description. "
+        "Correct only obvious spelling errors in human-readable descriptions when the intended spelling is clear "
+        "from context; never alter amounts, dates, invoice numbers, job numbers, vendor names, other identifiers, "
+        "or ambiguous wording:\n"
         f"{table_data}\n"
         "Return only the list of tuples."
     )

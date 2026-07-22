@@ -10,7 +10,7 @@ from datetime import datetime
 # Get today's date in the desired format (e.g., 'YYYY-MM-DD')
 today_date = datetime.now().strftime('%Y%m%d')
 
-dspy.configure(lm=dspy.LM('openai/gpt-4o'))
+dspy.configure(lm=dspy.LM('openai/gpt-5.6-terra', reasoning_effort='none'))
 
 file_path = r"D:\Programming\Billing_PDF_Automation\output\Matrix Media Services Invoice.docx"
 
@@ -87,7 +87,7 @@ from datetime import datetime
 # Get today's date in the desired format (e.g., 'YYYY-MM-DD')
 today_date = datetime.now().strftime('%Y%m%d')
 
-dspy.configure(lm=dspy.LM('openai/gpt-4o'))
+dspy.configure(lm=dspy.LM('openai/gpt-5.6-terra', reasoning_effort='none'))
 
 file_path = r"D:\Programming\Billing_PDF_Automation\output\Matrix Media Services Invoice.docx"
 
