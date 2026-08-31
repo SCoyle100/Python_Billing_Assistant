@@ -2,7 +2,6 @@ import os
 import logging
 from xml.etree.ElementTree import QName
 from dotenv import load_dotenv
-import sys
 import docx
 from docx.shared import Pt
 from docx.oxml import OxmlElement
@@ -22,9 +21,10 @@ from adobe.pdfservices.operation.pdfjobs.jobs.create_pdf_job import CreatePDFJob
 from adobe.pdfservices.operation.pdfjobs.result.create_pdf_result import CreatePDFResult
 from openai import OpenAI
 try:
-    from PyQt5.QtWidgets import QFileDialog, QApplication, QMessageBox
+    import tkinter as tk
+    from tkinter import filedialog, messagebox
 except ImportError:
-    QFileDialog = QApplication = QMessageBox = None
+    tk = filedialog = messagebox = None
 try:
     import win32com.client as win32
 except ImportError:
@@ -102,3 +102,53 @@ class PDFConverter:
         output_file_path = os.path.join(output_dir, f"{file_name}.docx")
 
         return output_file_path
+
+
+def run_manual_conversion(input_path):
+    """Convert one manually selected PDF using the normal headless converter."""
+    converter = PDFConverter()
+    output_path = converter.convert_pdf_to_docx(input_path)
+    if not output_path:
+        raise RuntimeError("Failed to convert PDF to DOCX.")
+    return output_path
+
+
+def main():
+    """Show a native Tkinter file picker when this module is run directly."""
+    if tk is None or filedialog is None or messagebox is None:
+        raise RuntimeError(
+            "Tkinter is not available. Install a Python build that includes Tcl/Tk, "
+            "or call PDFConverter.convert_pdf_to_docx(input_path) directly."
+        )
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        root.update_idletasks()
+        input_path = filedialog.askopenfilename(
+            parent=root,
+            title="Select a PDF to convert",
+            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
+        )
+        if not input_path:
+            return None
+
+        try:
+            output_path = run_manual_conversion(input_path)
+        except Exception as exc:
+            logging.exception("Manual PDF-to-DOCX conversion failed")
+            messagebox.showerror("Conversion failed", str(exc), parent=root)
+            return None
+
+        messagebox.showinfo(
+            "Conversion complete",
+            f"Created:\n{output_path}",
+            parent=root,
+        )
+        return output_path
+    finally:
+        root.destroy()
+
+
+if __name__ == "__main__":
+    main()

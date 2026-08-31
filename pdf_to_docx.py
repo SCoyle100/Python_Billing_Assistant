@@ -2,7 +2,6 @@ import os
 import logging
 from xml.etree.ElementTree import QName
 from dotenv import load_dotenv
-import sys
 import docx
 from docx.shared import Pt
 from docx.oxml import OxmlElement
@@ -21,7 +20,11 @@ from adobe.pdfservices.operation.pdfjobs.result.export_pdf_result import ExportP
 from adobe.pdfservices.operation.pdfjobs.jobs.create_pdf_job import CreatePDFJob
 from adobe.pdfservices.operation.pdfjobs.result.create_pdf_result import CreatePDFResult
 from openai import OpenAI
-from PyQt5.QtWidgets import QFileDialog, QApplication, QMessageBox
+try:
+    import tkinter as tk
+    from tkinter import filedialog, messagebox
+except ImportError:
+    tk = filedialog = messagebox = None
 import win32com.client as win32
 
 logging.basicConfig(level=logging.INFO)
@@ -288,41 +291,61 @@ def create_modified_doc_with_table(docx_path, extracted_data):
     return modified_docx_path
 
 
-def main():
-    app = QApplication(sys.argv)
-    file_dialog = QFileDialog()
-    file_dialog.setNameFilters(["PDF files (*.pdf)"])
-    if file_dialog.exec_():
-        input_path = file_dialog.selectedFiles()[0]
-        with open("input_path.txt", "w") as f:
-            f.write(input_path)
-        converter = PDFConverter()
-        docx_path = converter.convert_pdf_to_docx(input_path)
-        if docx_path:
-            converter.open_and_edit_docx(docx_path)
-            
-            # Save and close the initial document before modifications
-            save_and_close_initial_doc(converter)
+def run_manual_conversion(input_path):
+    """Run the existing interactive conversion workflow for one selected PDF."""
+    with open("input_path.txt", "w") as file:
+        file.write(input_path)
 
-            # Read table data and apply OpenAI extraction
-            table_data = read_word_file(docx_path)
-            extracted_amounts = extract_data_with_openai(table_data)
-            
-            # Create a modified document with the new table
-            modified_docx_path = create_modified_doc_with_table(docx_path, extracted_amounts)
-            
-            # Optionally, convert the modified DOCX to PDF
-            
-            # pdf_path = converter.create_pdf_from_docx(modified_docx_path)
-            # if pdf_path:
-            #     QMessageBox.information(None, 'Success', f'PDF created: {pdf_path}')
-            # else:
-            #     QMessageBox.warning(None, 'Error', 'Failed to create PDF from DOCX.')
-        else:
-            QMessageBox.warning(None, 'Error', 'Failed to convert PDF to DOCX.')
-    else:
-        QMessageBox.warning(None, 'Error', 'No file selected.')
-    return None
+    converter = PDFConverter()
+    docx_path = converter.convert_pdf_to_docx(input_path)
+    if not docx_path:
+        raise RuntimeError("Failed to convert PDF to DOCX.")
+
+    converter.open_and_edit_docx(docx_path)
+
+    # Preserve the original manual workflow: save and close the Adobe-exported
+    # document before extracting its table data and adding the invoice table.
+    save_and_close_initial_doc(converter)
+    table_data = read_word_file(docx_path)
+    extracted_amounts = extract_data_with_openai(table_data)
+    return create_modified_doc_with_table(docx_path, extracted_amounts)
+
+
+def main():
+    """Show a native Tkinter picker when this module is executed manually."""
+    if tk is None or filedialog is None or messagebox is None:
+        raise RuntimeError(
+            "Tkinter is not available. Install a Python build that includes Tcl/Tk, "
+            "or call PDFConverter.convert_pdf_to_docx(input_path) directly."
+        )
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        root.update_idletasks()
+        input_path = filedialog.askopenfilename(
+            parent=root,
+            title="Select a PDF to convert",
+            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
+        )
+        if not input_path:
+            return None
+
+        try:
+            modified_docx_path = run_manual_conversion(input_path)
+        except Exception as exc:
+            logging.exception("Manual PDF-to-DOCX conversion failed")
+            messagebox.showerror("Conversion failed", str(exc), parent=root)
+            return None
+
+        messagebox.showinfo(
+            "Conversion complete",
+            f"Created:\n{modified_docx_path}",
+            parent=root,
+        )
+        return modified_docx_path
+    finally:
+        root.destroy()
 
 if __name__ == "__main__":
     main()
