@@ -127,15 +127,35 @@ def extract_text_from_pdf(pdf_path):
     return ""
 
 
+def extract_text_from_docx(docx_path):
+    """Extract visible document text without requiring Microsoft Word."""
+    with zipfile.ZipFile(docx_path) as archive:
+        xml_bytes = archive.read("word/document.xml")
+
+    namespace = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    root = ET.fromstring(xml_bytes)
+    return " ".join(
+        text_node.text or ""
+        for text_node in root.findall(".//w:t", namespace)
+        if text_node.text
+    )
+
+
 def find_invoice_numbers_in_text(text):
     if not text:
         return []
 
     pattern = re.compile(
-        r"INVOICE\s*NO\.?\s*[:#-]?\s*([0-9]{5,}(?:-[A-Z])?)",
+        r"INVOICE\s*NO\.?\s*[:#-]?\s*"
+        r"([0-9](?:[ \t]*[0-9]){4,})[ \t]*(?:-[ \t]*([A-Z]))?",
         re.IGNORECASE,
     )
-    return pattern.findall(text)
+    invoice_numbers = []
+    for match in pattern.finditer(text):
+        numeric_part = re.sub(r"[ \t]", "", match.group(1))
+        suffix = match.group(2)
+        invoice_numbers.append(f"{numeric_part}-{suffix.upper()}" if suffix else numeric_part)
+    return invoice_numbers
 
 
 def _invoice_numeric_value(invoice_number):
@@ -143,57 +163,67 @@ def _invoice_numeric_value(invoice_number):
     return int(digits) if digits else -1
 
 
-def get_last_invoice_number_from_pdfs(output_dir=None):
+def get_last_invoice_number_from_outputs(output_dir=None):
     output_directory = pathlib.Path(output_dir) if output_dir else get_final_output_directory()
     if not output_directory.exists():
         logging.warning("Final invoice output directory does not exist: %s", output_directory)
         return None
 
-    pdf_files = sorted(
+    output_files = sorted(
         [
-            pdf_path for pdf_path in output_directory.iterdir()
-            if pdf_path.is_file() and pdf_path.suffix.lower() == ".pdf" and not pdf_path.name.startswith("~$")
+            output_path for output_path in output_directory.iterdir()
+            if output_path.is_file()
+            and output_path.suffix.lower() in {".pdf", ".docx"}
+            and not output_path.name.startswith("~$")
         ],
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
-    if not pdf_files:
-        logging.warning("No PDFs found in final invoice output directory: %s", output_directory)
+    if not output_files:
+        logging.warning("No PDF or DOCX files found in final invoice output directory: %s", output_directory)
         return None
 
-    pdfs_by_date = {}
-    for pdf_path in pdf_files:
-        modified_date = datetime.datetime.fromtimestamp(pdf_path.stat().st_mtime).date()
-        pdfs_by_date.setdefault(modified_date, []).append(pdf_path)
+    outputs_by_date = {}
+    for output_path in output_files:
+        modified_date = datetime.datetime.fromtimestamp(output_path.stat().st_mtime).date()
+        outputs_by_date.setdefault(modified_date, []).append(output_path)
 
-    for modified_date in sorted(pdfs_by_date.keys(), reverse=True):
+    for modified_date in sorted(outputs_by_date.keys(), reverse=True):
         invoice_numbers = []
-        for pdf_path in pdfs_by_date[modified_date]:
+        for output_path in outputs_by_date[modified_date]:
             try:
-                text = extract_text_from_pdf(pdf_path)
+                if output_path.suffix.lower() == ".pdf":
+                    text = extract_text_from_pdf(output_path)
+                else:
+                    text = extract_text_from_docx(output_path)
                 matches = find_invoice_numbers_in_text(text)
                 if matches:
                     logging.info(
                         "Found %s invoice number(s) in %s from %s",
                         len(matches),
-                        pdf_path.name,
+                        output_path.name,
                         modified_date,
                     )
                     invoice_numbers.extend(matches)
             except Exception as exc:
-                logging.warning("Unable to scan PDF %s for invoice numbers: %s", pdf_path, exc)
+                logging.warning("Unable to scan output file %s for invoice numbers: %s", output_path, exc)
 
         if invoice_numbers:
             last_invoice_number = max(invoice_numbers, key=_invoice_numeric_value)
             logging.info(
-                "Using invoice seed %s from newest PDF batch dated %s",
+                "Using invoice seed %s from newest PDF/DOCX batch dated %s",
                 last_invoice_number,
                 modified_date,
             )
             return last_invoice_number
 
-    logging.warning("No invoice numbers found in scanned final output PDFs.")
+    logging.warning("No invoice numbers found in scanned final output PDF/DOCX files.")
     return None
+
+
+def get_last_invoice_number_from_pdfs(output_dir=None):
+    """Backward-compatible name; final-output scanning now includes DOCX files."""
+    return get_last_invoice_number_from_outputs(output_dir)
 
 
 def get_invoice_number_seed(cursor=None, source_preference=None):
@@ -212,11 +242,13 @@ def get_invoice_number_seed(cursor=None, source_preference=None):
         return get_last_invoice_number(cursor)
 
     if source == "auto":
-        return get_last_invoice_number_from_pdfs() or (
-            get_last_invoice_number(cursor) if cursor is not None else None
+        logging.info(
+            "Invoice-number source 'auto' uses final-output PDF/DOCX files; "
+            "the database is only used when INVOICE_NUMBER_SOURCE=db."
         )
+        return get_last_invoice_number_from_outputs()
 
-    return get_last_invoice_number_from_pdfs()
+    return get_last_invoice_number_from_outputs()
 
 
 

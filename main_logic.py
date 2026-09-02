@@ -123,6 +123,20 @@ def normalize_amount_value(amount):
     return raw
 
 
+def should_add_invoice_page_break(vendor_name, has_images, invoice_index, invoice_count):
+    """Keep invoice records on separate pages without adding a blank image page."""
+    if vendor_name == "Capitol Media":
+        # Capitol's shared backup image is appended after every invoice. Add a
+        # break between invoice records, but let the image insertion provide
+        # the break after the final invoice.
+        has_next_invoice = invoice_index < invoice_count - 1
+        return has_next_invoice or not has_images
+
+    # Matrix/Fee images are inserted immediately after their invoice and add
+    # their own surrounding page breaks.
+    return not has_images
+
+
 def extract_invoice_suffix_from_job_number(job_number):
     match = re.search(
         rf"\b([A-Za-z]{{2,4}})\s*-?\s*(\d{{2,4}})\s*-?\s*([A-Za-z])\b",
@@ -1527,7 +1541,7 @@ def create_word_document():
         capitol_media_all_images = []
 
         # Build each invoice page
-        for invoice_data in invoice_list:
+        for invoice_index, invoice_data in enumerate(invoice_list):
             # Unpack invoice data with variable length handling
             if len(invoice_data) >= 8:
                 invoice_no, market, amount, batch_id, docx_file_path, service_period, description, job_number = invoice_data
@@ -1612,11 +1626,16 @@ def create_word_document():
             
             # Add the invoice page with description, service period, and job number
             add_invoice_page(
-                new_doc, 
-                invoice_no, 
-                market, 
-                amount, 
-                not has_images,  # Only add page break if no images
+                new_doc,
+                invoice_no,
+                market,
+                amount,
+                should_add_invoice_page_break(
+                    vendor_name,
+                    has_images,
+                    invoice_index,
+                    len(invoice_list),
+                ),
                 description=description,
                 service_period=service_period,
                 job_number=job_number

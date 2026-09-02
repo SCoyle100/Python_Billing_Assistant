@@ -124,14 +124,6 @@ def _find_total_row_index(table, start_index):
     return len(table.rows) - 1
 
 
-def _first_non_empty_paragraph_text(cell):
-    for paragraph in cell.paragraphs:
-        text = paragraph.text.strip()
-        if text:
-            return text
-    return ""
-
-
 def _paragraph_lines(cell):
     return [
         paragraph.text.strip()
@@ -172,36 +164,57 @@ def _normalize_intro_lines(intro_lines):
     return normalized_lines
 
 
-def _extract_adjusted_amounts(detail_row):
+def _looks_like_dated_work_order(text):
+    normalized = str(text or "").strip().lower()
+    has_date = bool(re.search(r"\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b", normalized))
+    has_work_order_context = bool(
+        re.search(
+            r"\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+            r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|"
+            r"dec(?:ember)?|w\s*/?\s*o)\b",
+            normalized,
+        )
+    )
+    return has_date and has_work_order_context
+
+
+def _extract_dated_line_item_labels(detail_row):
     """
-    Read the original amount paragraph sequence and fold negative discount rows
-    back into the preceding positive amount.
+    Preserve dated work-order labels from the vendor document while ignoring
+    their discount/markup rows. Converted Capitol documents align the trailing
+    description paragraphs with the amount paragraphs.
     """
+    description_text = "\n".join(_paragraph_lines(detail_row.cells[0]))
+
+    # Adobe's Word conversion can merge a work-order label and its discount
+    # text into one paragraph (for example, "July wo 7/20 Discount @ 2.5%").
+    # Extract the label itself instead of relying on paragraph/amount alignment.
+    month_pattern = (
+        r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+        r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|"
+        r"dec(?:ember)?"
+    )
+    label_pattern = re.compile(
+        rf"\b(?:{month_pattern})\s+w\s*/?\s*o\s+\d{{1,2}}/\d{{1,2}}(?:/\d{{2,4}})?\b",
+        re.IGNORECASE,
+    )
+    labels = [match.group(0).strip() for match in label_pattern.finditer(description_text)]
+    if labels:
+        return labels
+
+    # Fallback for converted documents that keep each label and amount on
+    # separate, aligned paragraphs.
+    description_lines = _paragraph_lines(detail_row.cells[0])
     amount_lines = _paragraph_lines(detail_row.cells[-1])
-    adjusted_amounts = []
+    if not amount_lines or len(description_lines) < len(amount_lines):
+        return []
 
-    for line in amount_lines:
-        amount = _parse_amount(line)
-        if amount > 0:
-            adjusted_amounts.append(amount)
-        elif amount < 0 and adjusted_amounts:
-            adjusted_amounts[-1] += abs(amount)
-
-    return adjusted_amounts
-
-
-def _extract_adjusted_amounts_from_row(row):
-    amount_lines = _paragraph_lines(row.cells[-1])
-    adjusted_amounts = []
-
-    for line in amount_lines:
-        amount = _parse_amount(line)
-        if amount > 0:
-            adjusted_amounts.append(amount)
-        elif amount < 0 and adjusted_amounts:
-            adjusted_amounts[-1] += abs(amount)
-
-    return adjusted_amounts
+    aligned_descriptions = description_lines[-len(amount_lines):]
+    return [
+        description
+        for description, amount_text in zip(aligned_descriptions, amount_lines)
+        if _parse_amount(amount_text) > 0 and _looks_like_dated_work_order(description)
+    ]
 
 
 def _capture_paragraph_properties(cell):
@@ -215,26 +228,42 @@ def _capture_paragraph_properties(cell):
     return properties
 
 
-def _apply_adjusted_amounts(invoice_rows, adjusted_amounts):
-    if not adjusted_amounts:
+def _normalize_invoice_rows_for_display(invoice_rows):
+    """Reduce enriched invoice tuples to the market/amount fields used by the table."""
+    normalized_rows = []
+    for invoice_row in invoice_rows:
+        try:
+            values = list(invoice_row)
+        except TypeError:
+            logging.warning("Skipping invalid Capitol invoice row: %r", invoice_row)
+            continue
+
+        if len(values) < 2:
+            logging.warning("Skipping incomplete Capitol invoice row: %r", invoice_row)
+            continue
+
+        normalized_rows.append((values[0], values[1]))
+
+    return normalized_rows
+
+
+def _apply_source_line_item_labels(invoice_rows, source_labels):
+    if not source_labels:
         return invoice_rows
 
-    updated_rows = []
-    for index, (market, amount) in enumerate(invoice_rows):
-        if index < len(adjusted_amounts):
-            updated_rows.append((market, adjusted_amounts[index]))
-        else:
-            updated_rows.append((market, amount))
-
-    if len(adjusted_amounts) != len(invoice_rows):
+    if len(source_labels) != len(invoice_rows):
         logging.warning(
-            "Capitol adjusted amount count (%s) did not match extracted invoice row count (%s). "
-            "Applied adjusted amounts by order where possible.",
-            len(adjusted_amounts),
+            "Capitol dated line-item count (%s) did not match invoice row count (%s); "
+            "keeping extracted market names.",
+            len(source_labels),
             len(invoice_rows),
         )
+        return invoice_rows
 
-    return updated_rows
+    return [
+        (source_labels[index], amount)
+        for index, (_, amount) in enumerate(invoice_rows)
+    ]
 
 
 def _clear_cell(cell):
@@ -384,7 +413,7 @@ def rebuild_capitol_media_table(docx_path, invoice_rows):
     original_total_row = table.rows[total_row_index]
     preserved_intro_lines = _normalize_intro_lines(_extract_intro_lines(original_detail_row))
     intro_paragraph_properties = _capture_paragraph_properties(original_detail_row.cells[0])
-    adjusted_amounts = _extract_adjusted_amounts_from_row(original_detail_row)
+    source_line_item_labels = _extract_dated_line_item_labels(original_detail_row)
 
     detail_template = deepcopy(original_detail_row._tr)
     total_template = deepcopy(original_total_row._tr)
@@ -392,9 +421,18 @@ def rebuild_capitol_media_table(docx_path, invoice_rows):
     for row_index in range(total_row_index, detail_row_index - 1, -1):
         table._tbl.remove(table.rows[row_index]._tr)
 
-    adjusted_invoice_rows = _apply_adjusted_amounts(invoice_rows, adjusted_amounts)
+    # Email overrides enrich Capitol rows with description, job number, and
+    # invoice-suffix metadata. The visual pricing table only consumes market
+    # and amount, while the full tuples continue downstream to the database.
+    display_invoice_rows = _normalize_invoice_rows_for_display(invoice_rows)
+    display_invoice_rows = _apply_source_line_item_labels(
+        display_invoice_rows,
+        source_line_item_labels,
+    )
 
-    detail_rows, running_total = _split_invoice_rows(adjusted_invoice_rows)
+    # The email/extraction rows are authoritative. Vendor discount or markup
+    # lines are deliberately omitted rather than folded into the positive rows.
+    detail_rows, running_total = _split_invoice_rows(display_invoice_rows)
     row_specs = []
 
     if preserved_intro_lines:

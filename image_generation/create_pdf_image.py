@@ -155,9 +155,15 @@ def convert_pdf_to_images(pdf_path, dpi=600, vendor_name=None, invoice_data=None
             # Get first invoice number if available
             invoice_no = None
             if invoice_data and len(invoice_data) > 0:
-                # Use the first invoice in the data
-                _, _, invoice_no = invoice_data[0]
-                logging.info(f"Using first invoice number for Capitol Media: {invoice_no}")
+                # Rebuild/email processing can enrich rows beyond the original
+                # (market, amount, invoice_no) shape. Only the first three
+                # fields are relevant to the backup-image filename.
+                first_invoice = invoice_data[0]
+                if len(first_invoice) >= 3:
+                    invoice_no = first_invoice[2]
+                    logging.info(f"Using first invoice number for Capitol Media: {invoice_no}")
+                else:
+                    logging.warning("Incomplete Capitol Media invoice data: %r", first_invoice)
             
             if not invoice_no:
                 # Fallback to using the filename if no invoice number
