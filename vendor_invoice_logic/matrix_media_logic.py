@@ -2,6 +2,8 @@ try:
     import win32com.client
 except ImportError:
     win32com = None
+import datetime
+import itertools
 import re
 import sys
 
@@ -12,6 +14,135 @@ wdFindStop = 0
 wdCollapseEnd = 0  # Collapse to end of range
 wdCharacter = 1    # Unit for character movement
 PENSACOLA_MARGIN_MULTIPLIER = 1108.0 / 950.0
+SERVICE_PERIOD_PATTERN = re.compile(
+    r"(?P<start_month>\d{1,3})/(?P<start_day>\d{1,3})/(?P<start_year>\d{2}|\d{4})"
+    r"\s*[-\u2013\u2014]\s*"
+    r"(?P<end_month>\d{1,3})/(?P<end_day>\d{1,3})/(?P<end_year>\d{2}|\d{4})"
+)
+# Matrix placements are normally four-week/month-length periods. Date
+# subtraction is 27 days for a 28-day inclusive service period.
+TARGET_MATRIX_SERVICE_PERIOD_DAYS = 27
+MIN_MATRIX_SERVICE_PERIOD_DAYS = 20
+MAX_MATRIX_SERVICE_PERIOD_DAYS = 35
+
+
+def _component_candidates(value, maximum, max_digits=2):
+    """Return valid values obtainable without reordering the source digits."""
+    digits = str(value)
+    candidates = []
+
+    # Only remove overflow digits. A normal-width but invalid component such as
+    # month 99 is not safe to guess at.
+    length = min(len(digits), max_digits)
+    for positions in itertools.combinations(range(len(digits)), length):
+        candidate_text = "".join(digits[position] for position in positions)
+        candidate = int(candidate_text)
+        if 1 <= candidate <= maximum and candidate not in candidates:
+            candidates.append(candidate)
+
+    return candidates
+
+
+def _year_value(value):
+    year = int(value)
+    return 2000 + year if len(str(value)) == 2 else year
+
+
+def _date_candidates(month_text, day_text, year_text):
+    candidates = []
+    for month in _component_candidates(month_text, 12):
+        for day in _component_candidates(day_text, 31):
+            try:
+                candidates.append(datetime.date(_year_value(year_text), month, day))
+            except ValueError:
+                continue
+    return candidates
+
+
+def _is_valid_date_parts(month_text, day_text, year_text):
+    try:
+        datetime.date(_year_value(year_text), int(month_text), int(day_text))
+        return len(month_text) <= 2 and len(day_text) <= 2
+    except ValueError:
+        return False
+
+
+def correct_matrix_service_period(value):
+    """Repair malformed Matrix date ranges by preferring a roughly monthly span.
+
+    For example, ``8/313/26-9/27/26`` has two plausible start days (31 and
+    13).  A start on August 31 produces the normal 27-day billing period, so it
+    is preferred over the unusual 45-day alternative.
+    """
+    text = str(value or "")
+
+    def replace_match(match):
+        parts = match.groupdict()
+        start_valid = _is_valid_date_parts(
+            parts["start_month"], parts["start_day"], parts["start_year"]
+        )
+        end_valid = _is_valid_date_parts(
+            parts["end_month"], parts["end_day"], parts["end_year"]
+        )
+
+        # Valid ranges are left untouched, including their original spacing.
+        if start_valid and end_valid:
+            return match.group(0)
+
+        start_candidates = _date_candidates(
+            parts["start_month"], parts["start_day"], parts["start_year"]
+        )
+        end_candidates = _date_candidates(
+            parts["end_month"], parts["end_day"], parts["end_year"]
+        )
+        plausible_ranges = []
+        for start_date in start_candidates:
+            for end_date in end_candidates:
+                duration = (end_date - start_date).days
+                if (
+                    MIN_MATRIX_SERVICE_PERIOD_DAYS
+                    <= duration
+                    <= MAX_MATRIX_SERVICE_PERIOD_DAYS
+                ):
+                    plausible_ranges.append((start_date, end_date, duration))
+
+        if not plausible_ranges:
+            return match.group(0)
+
+        start_date, end_date, _ = min(
+            plausible_ranges,
+            key=lambda item: (
+                abs(item[2] - TARGET_MATRIX_SERVICE_PERIOD_DAYS),
+                -item[2],
+            ),
+        )
+        start_year = (
+            str(start_date.year)
+            if len(parts["start_year"]) == 4
+            else f"{start_date.year % 100:02d}"
+        )
+        end_year = (
+            str(end_date.year)
+            if len(parts["end_year"]) == 4
+            else f"{end_date.year % 100:02d}"
+        )
+        return (
+            f"{start_date.month}/{start_date.day}/{start_year} - "
+            f"{end_date.month}/{end_date.day}/{end_year}"
+        )
+
+    return SERVICE_PERIOD_PATTERN.sub(replace_match, text)
+
+
+def normalize_page_service_periods(page_market_mapping):
+    """Keep the pre-read page mapping aligned with corrections saved to Word."""
+    if not page_market_mapping:
+        return
+
+    for page_num, page_data in list(page_market_mapping.items()):
+        if isinstance(page_data, tuple) and len(page_data) >= 2:
+            corrected = correct_matrix_service_period(page_data[1])
+            page_market_mapping[page_num] = (page_data[0], corrected, *page_data[2:])
 
 def parse_dollar_amount(dollar_str):
     """
@@ -126,6 +257,7 @@ def analyze_word_document(file_path, page_market_mapping=None, amount_overrides=
     # Open the document
     doc = word.Documents.Open(file_path)
     page_to_market = {}
+    normalize_page_service_periods(page_market_mapping)
 
 
     try:
@@ -147,15 +279,17 @@ def analyze_word_document(file_path, page_market_mapping=None, amount_overrides=
 
         # 3. Process each page: update the table and the text boxes
         for page_num, table in page_tables.items():
-            # Find the "Amount" column index in the header row
+            # Find the relevant column indices in the header row.
             amount_col_index = None
+            service_period_col_index = None
             num_cols = table.Columns.Count
 
             for col_idx in range(1, num_cols + 1):
                 header_text = table.Cell(1, col_idx).Range.Text.strip()
                 if "Amount" in header_text:
                     amount_col_index = col_idx
-                    break
+                elif "Service Period" in header_text:
+                    service_period_col_index = col_idx
 
             # If no "Amount" column found, skip this table
             if amount_col_index is None:
@@ -164,6 +298,35 @@ def analyze_word_document(file_path, page_market_mapping=None, amount_overrides=
             # Update amounts in the "Amount" column for each data row
             num_rows = table.Rows.Count
             for row_idx in range(2, num_rows + 1):  # Start from second row
+                if service_period_col_index is not None:
+                    service_cell = table.Cell(row_idx, service_period_col_index)
+                    service_range = service_cell.Range
+                    original_period = (
+                        service_range.Text.replace("\r", "").replace("\a", "").strip()
+                    )
+                    corrected_period = correct_matrix_service_period(original_period)
+                    if corrected_period != original_period:
+                        service_find = service_range.Find
+                        service_find.ClearFormatting()
+                        service_find.Replacement.ClearFormatting()
+                        service_find.Execute(
+                            FindText=original_period,
+                            MatchCase=True,
+                            MatchWholeWord=False,
+                            MatchWildcards=False,
+                            MatchSoundsLike=False,
+                            MatchAllWordForms=False,
+                            Forward=True,
+                            Wrap=wdFindStop,
+                            Format=False,
+                            ReplaceWith=corrected_period,
+                            Replace=wdReplaceOne,
+                        )
+                        print(
+                            f"Corrected Matrix service period '{original_period}' "
+                            f"to '{corrected_period}'"
+                        )
+
                 cell = table.Cell(row_idx, amount_col_index)
                 cell_range = cell.Range
                 cell_text = cell_range.Text.replace("\r", "").replace("\a", "").strip()
