@@ -31,7 +31,7 @@ from database.database_functions import (
 
 from vendor_invoice_logic.vendor_id import identify_vendors_from_pdfs_in_directory
 
-from vendor_invoice_logic.matrix_media_logic import analyze_word_document
+from vendor_invoice_logic.matrix_media_logic import analyze_word_document, calculate_updated_amount
 
 from vendor_invoice_logic.matrix_media_dataframe import (
     build_dataframe_from_word_document,
@@ -534,6 +534,56 @@ def parse_amount_cents(amount):
         return None
 
 
+def matrix_expected_total_cents(market, attachment_amount):
+    """Return the raw and standard Matrix-calculated totals for amount matching."""
+    raw_cents = parse_amount_cents(attachment_amount)
+    if raw_cents is None:
+        return set()
+
+    expected_totals = {raw_cents}
+    original_amount = f"${raw_cents / 100:,.2f}"
+    calculated_amount = calculate_updated_amount(original_amount, market)
+    calculated_cents = parse_amount_cents(calculated_amount)
+    if calculated_cents is not None:
+        expected_totals.add(calculated_cents)
+    return expected_totals
+
+
+def select_matrix_email_candidate_by_total(
+    candidate_rows,
+    used_email_indexes,
+    market,
+    attachment_amount,
+):
+    """Match same-city Matrix email rows by raw or normally calculated total."""
+    available = [
+        (candidate_index, candidate)
+        for candidate_index, candidate in candidate_rows
+        if candidate_index not in used_email_indexes
+    ]
+    if not available:
+        return None
+
+    expected_totals = matrix_expected_total_cents(market, attachment_amount)
+    amount_matches = [
+        (candidate_index, candidate)
+        for candidate_index, candidate in available
+        if parse_amount_cents(candidate.get("amount")) in expected_totals
+    ]
+    if len(amount_matches) == 1:
+        return amount_matches[0]
+    if len(available) == 1:
+        return available[0]
+
+    logging.warning(
+        "Multiple Matrix email rows remain for %s, but total %s did not identify one uniquely. "
+        "Leaving the page unmatched instead of guessing.",
+        market,
+        attachment_amount,
+    )
+    return None
+
+
 def append_service_period_if_missing(description, service_period):
     display_text = str(description or "").strip()
     period_text = str(service_period or "").strip()
@@ -575,10 +625,80 @@ def warn_matrix_job_number_difference(market, hardcoded_job_number, email_row):
     print(f"WARNING: {warning_message}")
 
 
+def coalesce_matrix_line_items_for_email(invoices_list, email_rows):
+    """Collapse component rows that together represent one Matrix email total."""
+    indexed_rows = []
+    groups = {}
+    for index, invoice_item in enumerate(invoices_list):
+        values = list(invoice_item)
+        while len(values) < 4:
+            values.append("")
+        market, amount, service_period, description = values[:4]
+        market_key = identify_matrix_email_market(market, description) or str(market or "").strip()
+        group_key = (market_key, normalize_match_text(service_period))
+        indexed_rows.append((invoice_item, values, group_key))
+        groups.setdefault(group_key, []).append(index)
+
+    replacements = {}
+    skipped_indexes = set()
+    for (market_key, normalized_period), indexes in groups.items():
+        if len(indexes) <= 1:
+            continue
+
+        row_cents = [parse_amount_cents(indexed_rows[index][1][1]) for index in indexes]
+        if any(value is None for value in row_cents):
+            continue
+        combined_cents = sum(row_cents)
+
+        candidate_rows = [
+            row
+            for row in email_rows
+            if identify_matrix_email_market(row.get("description", "")) == market_key
+        ]
+        if normalized_period:
+            period_matches = [
+                row
+                for row in candidate_rows
+                if normalized_period in normalize_match_text(row.get("description", ""))
+            ]
+            if period_matches:
+                candidate_rows = period_matches
+
+        matching_email_rows = [
+            row for row in candidate_rows if parse_amount_cents(row.get("amount")) == combined_cents
+        ]
+        if len(matching_email_rows) != 1:
+            continue
+
+        first_index = indexes[0]
+        first_values = indexed_rows[first_index][1]
+        replacements[first_index] = (
+            first_values[0],
+            f"{combined_cents / 100:.2f}",
+            first_values[2],
+            first_values[3],
+        )
+        skipped_indexes.update(indexes[1:])
+        logging.info(
+            "Combined %s Matrix line items for %s into one email total of %.2f",
+            len(indexes),
+            market_key,
+            combined_cents / 100,
+        )
+
+    return [
+        replacements.get(index, invoice_item)
+        for index, invoice_item in enumerate(invoices_list)
+        if index not in skipped_indexes
+    ]
+
+
 def apply_matrix_email_overrides(invoices_list):
     email_rows = get_email_invoice_rows_for_source("Matrix Media")
     if not email_rows:
         return invoices_list
+
+    invoices_list = coalesce_matrix_line_items_for_email(invoices_list, email_rows)
 
     email_rows_by_market = {}
     for email_index, row in enumerate(email_rows):
@@ -598,21 +718,15 @@ def apply_matrix_email_overrides(invoices_list):
         candidate_rows = email_rows_by_market.get(market_key, [])
         email_row = None
         normalized_service_period = normalize_match_text(service_period)
-        if normalized_service_period:
-            for candidate_index, candidate in candidate_rows:
-                if candidate_index in used_email_indexes:
-                    continue
-                if normalized_service_period in normalize_match_text(candidate["description"]):
-                    email_row = candidate
-                    used_email_indexes.add(candidate_index)
-                    break
-
-        if not email_row:
-            for candidate_index, candidate in candidate_rows:
-                if candidate_index not in used_email_indexes:
-                    email_row = candidate
-                    used_email_indexes.add(candidate_index)
-                    break
+        selected_candidate = select_matrix_email_candidate_by_total(
+            candidate_rows,
+            used_email_indexes,
+            market,
+            attachment_amount,
+        )
+        if selected_candidate:
+            candidate_index, email_row = selected_candidate
+            used_email_indexes.add(candidate_index)
 
         if not email_row and normalized_service_period:
             for candidate_index, candidate in enumerate(email_rows):
@@ -679,31 +793,25 @@ def build_matrix_amount_overrides(page_market_mapping):
     amount_overrides = {}
     used_email_indexes = set()
     for page_num, page_data in page_market_mapping.items():
-        if isinstance(page_data, tuple) and len(page_data) == 2:
-            market, service_period = page_data
+        if isinstance(page_data, tuple) and len(page_data) >= 2:
+            market, service_period = page_data[:2]
+            page_total = page_data[2] if len(page_data) >= 3 else None
         else:
             market, service_period = page_data, ""
+            page_total = None
 
         market_key = identify_matrix_email_market(market, service_period) or str(market or "").strip()
         candidate_rows = email_rows_by_market.get(market_key, [])
         email_row = None
-        normalized_service_period = normalize_match_text(service_period)
-
-        if normalized_service_period:
-            for candidate_index, candidate in candidate_rows:
-                if candidate_index in used_email_indexes:
-                    continue
-                if normalized_service_period in normalize_match_text(candidate["description"]):
-                    email_row = candidate
-                    used_email_indexes.add(candidate_index)
-                    break
-
-        if not email_row:
-            for candidate_index, candidate in candidate_rows:
-                if candidate_index not in used_email_indexes:
-                    email_row = candidate
-                    used_email_indexes.add(candidate_index)
-                    break
+        selected_candidate = select_matrix_email_candidate_by_total(
+            candidate_rows,
+            used_email_indexes,
+            market,
+            page_total,
+        )
+        if selected_candidate:
+            candidate_index, email_row = selected_candidate
+            used_email_indexes.add(candidate_index)
 
         if not email_row:
             continue
@@ -720,10 +828,11 @@ def build_matrix_amount_overrides(page_market_mapping):
             }
         )
         logging.info(
-            "Matrix backup amount override for page %s (%s, %s): %s",
+            "Matrix backup amount override for page %s (%s, %s, source total %s): %s",
             page_num,
             market,
             service_period,
+            page_total,
             email_amount,
         )
 
@@ -1025,7 +1134,7 @@ def handle_vendor_identification(pdf_file_path, vendor_map=None):
         case "Matrix Media":
             print(f"Executing script for {base_name}, vendor is Matrix Media...")
             docx_file_path = converter.convert_pdf_to_docx(pdf_file_path)
-            page_to_market = read_page_markets(docx_file_path)
+            page_to_market = read_page_markets(docx_file_path, include_page_total=True)
             matrix_amount_overrides = build_matrix_amount_overrides(page_to_market)
             # Apply the matrix media logic to update dollar amounts in the Word document
             analyze_word_document(
@@ -1083,8 +1192,8 @@ def handle_vendor_identification(pdf_file_path, vendor_map=None):
             
             print("DEBUG: Page to market mapping:")
             for page, page_data in page_to_market.items():
-                if isinstance(page_data, tuple) and len(page_data) == 2:
-                    market, service_period = page_data
+                if isinstance(page_data, tuple) and len(page_data) >= 2:
+                    market, service_period = page_data[:2]
                     print(f"Page {page}: market='{market}', service_period='{service_period}'")
                 else:
                     print(f"Page {page}: '{page_data}'")
@@ -1092,8 +1201,8 @@ def handle_vendor_identification(pdf_file_path, vendor_map=None):
             # Ensure we use a simplified version of page_to_market with consistent service periods
             normalized_page_mapping = {}
             for page_num, page_data in page_to_market.items():
-                if isinstance(page_data, tuple) and len(page_data) == 2:
-                    market, service_period = page_data
+                if isinstance(page_data, tuple) and len(page_data) >= 2:
+                    market, service_period = page_data[:2]
                     # Normalize market name to match database
                     if any(fp in market.lower() for fp in ["fort payne", "ft. payne", "ft payne"]):
                         market = "Fort Payne"

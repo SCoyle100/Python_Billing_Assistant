@@ -6,6 +6,7 @@ import datetime
 import itertools
 import re
 import sys
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 # Word constants
 wdActiveEndPageNumber = 3
@@ -18,6 +19,9 @@ SERVICE_PERIOD_PATTERN = re.compile(
     r"(?P<start_month>\d{1,3})/(?P<start_day>\d{1,3})/(?P<start_year>\d{2}|\d{4})"
     r"\s*[-\u2013\u2014]\s*"
     r"(?P<end_month>\d{1,3})/(?P<end_day>\d{1,3})/(?P<end_year>\d{2}|\d{4})"
+)
+SINGLE_SERVICE_DATE_PATTERN = re.compile(
+    r"\d{1,2}/\d{1,2}/(?:\d{2}|\d{4})"
 )
 # Matrix placements are normally four-week/month-length periods. Date
 # subtraction is 27 days for a 28-day inclusive service period.
@@ -134,6 +138,20 @@ def correct_matrix_service_period(value):
     return SERVICE_PERIOD_PATTERN.sub(replace_match, text)
 
 
+def first_matrix_service_period(value):
+    """Return only the first date or date range found in a Matrix service cell."""
+    corrected = correct_matrix_service_period(value)
+    range_match = SERVICE_PERIOD_PATTERN.search(corrected)
+    if range_match:
+        return range_match.group(0).strip()
+
+    date_match = SINGLE_SERVICE_DATE_PATTERN.search(corrected)
+    if date_match:
+        return date_match.group(0).strip()
+
+    return str(corrected or "").strip()
+
+
 def normalize_page_service_periods(page_market_mapping):
     """Keep the pre-read page mapping aligned with corrections saved to Word."""
     if not page_market_mapping:
@@ -141,7 +159,7 @@ def normalize_page_service_periods(page_market_mapping):
 
     for page_num, page_data in list(page_market_mapping.items()):
         if isinstance(page_data, tuple) and len(page_data) >= 2:
-            corrected = correct_matrix_service_period(page_data[1])
+            corrected = first_matrix_service_period(page_data[1])
             page_market_mapping[page_num] = (page_data[0], corrected, *page_data[2:])
 
 def parse_dollar_amount(dollar_str):
@@ -166,6 +184,137 @@ def format_dollar_amount(value):
         whole_part = int(value)
         formatted = '${:,}.{:02d}'.format(whole_part, int((value - whole_part) * 100))
     return formatted
+
+
+def amount_to_cents(value):
+    """Convert a currency-like value to integer cents without float rounding."""
+    cleaned = re.sub(r"[^\d.\-]", "", str(value or ""))
+    if not cleaned:
+        return None
+    try:
+        decimal_value = Decimal(cleaned).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    except InvalidOperation:
+        return None
+    return int(decimal_value * 100)
+
+
+def format_cents(cents):
+    return f"${Decimal(cents) / Decimal(100):,.2f}"
+
+
+def prompt_matrix_line_item_amounts(line_items, email_total):
+    """Show one dialog for correcting every Matrix line item on a page."""
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+    except ImportError as exc:
+        raise RuntimeError(
+            "Matrix line-item amounts need manual review, but tkinter is unavailable."
+        ) from exc
+
+    root = tk.Tk()
+    root.withdraw()
+    dialog = tk.Toplevel(root)
+    dialog.title("Review Matrix line items")
+    dialog.resizable(False, False)
+    dialog.attributes("-topmost", True)
+
+    target_cents = amount_to_cents(email_total)
+    result = {"values": None}
+
+    tk.Label(
+        dialog,
+        text=(
+            f"The Matrix backup has {len(line_items)} line items that do not add up "
+            f"to the email total of {format_cents(target_cents)}.\n"
+            "Enter the correct amount for each line item. The entries must add up "
+            "to the email total."
+        ),
+        justify="left",
+        padx=12,
+        pady=10,
+    ).grid(row=0, column=0, columnspan=2, sticky="w")
+
+    entries = []
+    for index, item in enumerate(line_items, start=1):
+        label = str(item.get("label") or f"Line item {index}").strip()
+        tk.Label(dialog, text=label, anchor="w", padx=12).grid(
+            row=index, column=0, sticky="w"
+        )
+        entry = tk.Entry(dialog, width=16, justify="right")
+        entry.insert(0, format_cents(amount_to_cents(item.get("amount"))))
+        entry.grid(row=index, column=1, padx=(8, 12), pady=3)
+        entries.append(entry)
+
+    def submit():
+        entered_cents = [amount_to_cents(entry.get()) for entry in entries]
+        if any(value is None or value < 0 for value in entered_cents):
+            messagebox.showerror(
+                "Invalid amount",
+                "Enter a valid non-negative dollar amount for every line item.",
+                parent=dialog,
+            )
+            return
+        if sum(entered_cents) != target_cents:
+            messagebox.showerror(
+                "Amounts do not match",
+                (
+                    f"The line items add up to {format_cents(sum(entered_cents))}, "
+                    f"but the email total is {format_cents(target_cents)}."
+                ),
+                parent=dialog,
+            )
+            return
+        result["values"] = entered_cents
+        dialog.destroy()
+
+    def cancel():
+        dialog.destroy()
+
+    button_row = len(line_items) + 1
+    tk.Button(dialog, text="Cancel", width=10, command=cancel).grid(
+        row=button_row, column=0, padx=12, pady=12, sticky="e"
+    )
+    tk.Button(dialog, text="Use amounts", width=12, command=submit).grid(
+        row=button_row, column=1, padx=12, pady=12, sticky="e"
+    )
+    dialog.protocol("WM_DELETE_WINDOW", cancel)
+    entries[0].focus_set()
+    dialog.grab_set()
+    root.wait_window(dialog)
+    root.destroy()
+
+    if result["values"] is None:
+        raise RuntimeError("Matrix line-item review was cancelled; no amounts were changed.")
+    return result["values"]
+
+
+def reconcile_matrix_line_item_amounts(line_items, email_total, prompt_callback=None):
+    """Preserve matching multi-line totals; otherwise request exact line amounts."""
+    if len(line_items) <= 1:
+        return [item.get("amount", "") for item in line_items]
+
+    target_cents = amount_to_cents(email_total)
+    original_cents = [amount_to_cents(item.get("amount")) for item in line_items]
+    if target_cents is None or any(value is None for value in original_cents):
+        raise ValueError("Could not compare the Matrix line items with the email total.")
+
+    if sum(original_cents) == target_cents:
+        return [format_cents(value) for value in original_cents]
+
+    prompt = prompt_callback or prompt_matrix_line_item_amounts
+    entered_values = prompt(line_items, email_total)
+    entered_cents = [
+        value if isinstance(value, int) else amount_to_cents(value)
+        for value in entered_values
+    ]
+    if len(entered_cents) != len(line_items):
+        raise ValueError("A corrected amount is required for every Matrix line item.")
+    if any(value is None or value < 0 for value in entered_cents):
+        raise ValueError("Every corrected Matrix line-item amount must be valid.")
+    if sum(entered_cents) != target_cents:
+        raise ValueError("Corrected Matrix line items must add up to the email total.")
+    return [format_cents(value) for value in entered_cents]
 
 
 def normalize_amount_override_value(value):
@@ -282,6 +431,8 @@ def analyze_word_document(file_path, page_market_mapping=None, amount_overrides=
             # Find the relevant column indices in the header row.
             amount_col_index = None
             service_period_col_index = None
+            market_col_index = None
+            description_col_index = None
             num_cols = table.Columns.Count
 
             for col_idx in range(1, num_cols + 1):
@@ -290,10 +441,69 @@ def analyze_word_document(file_path, page_market_mapping=None, amount_overrides=
                     amount_col_index = col_idx
                 elif "Service Period" in header_text:
                     service_period_col_index = col_idx
+                elif "Market" in header_text:
+                    market_col_index = col_idx
+                elif "Description" in header_text:
+                    description_col_index = col_idx
 
             # If no "Amount" column found, skip this table
             if amount_col_index is None:
                 continue
+
+            # A Matrix page can contain multiple component charges for one email
+            # total (for example, production plus shipping). Never replace every
+            # component row with the full email total. Preserve the source rows
+            # when their sum already matches; otherwise ask the user for the
+            # corrected allocation before changing the document.
+            page_market_text = get_page_market_text(page_market_mapping, page_num)
+            line_items = []
+            for row_idx in range(2, table.Rows.Count + 1):
+                amount_text = (
+                    table.Cell(row_idx, amount_col_index)
+                    .Range.Text.replace("\r", "")
+                    .replace("\a", "")
+                    .strip()
+                )
+                row_matches = list(dollar_amount_pattern.finditer(amount_text))
+                if market_col_index is not None:
+                    row_market = table.Cell(row_idx, market_col_index).Range.Text.strip()
+                    page_market_text = f"{page_market_text} {row_market}".strip()
+                else:
+                    row_market = ""
+                if description_col_index is not None:
+                    row_description = (
+                        table.Cell(row_idx, description_col_index)
+                        .Range.Text.replace("\r", "")
+                        .replace("\a", "")
+                        .strip()
+                    )
+                else:
+                    row_description = ""
+                for match_index, match in enumerate(row_matches):
+                    line_items.append(
+                        {
+                            "row_idx": row_idx,
+                            "match_index": match_index,
+                            "amount": match.group(0),
+                            "label": row_description or row_market or f"Row {row_idx}",
+                        }
+                    )
+
+            page_email_total = find_amount_override(
+                amount_overrides,
+                page_num,
+                page_market_text,
+            )
+            line_item_overrides = {}
+            if page_email_total and len(line_items) > 1:
+                reconciled_amounts = reconcile_matrix_line_item_amounts(
+                    line_items,
+                    page_email_total,
+                )
+                line_item_overrides = {
+                    (item["row_idx"], item["match_index"]): amount
+                    for item, amount in zip(line_items, reconciled_amounts)
+                }
 
             # Update amounts in the "Amount" column for each data row
             num_rows = table.Rows.Count
@@ -304,24 +514,12 @@ def analyze_word_document(file_path, page_market_mapping=None, amount_overrides=
                     original_period = (
                         service_range.Text.replace("\r", "").replace("\a", "").strip()
                     )
-                    corrected_period = correct_matrix_service_period(original_period)
+                    corrected_period = first_matrix_service_period(original_period)
                     if corrected_period != original_period:
-                        service_find = service_range.Find
-                        service_find.ClearFormatting()
-                        service_find.Replacement.ClearFormatting()
-                        service_find.Execute(
-                            FindText=original_period,
-                            MatchCase=True,
-                            MatchWholeWord=False,
-                            MatchWildcards=False,
-                            MatchSoundsLike=False,
-                            MatchAllWordForms=False,
-                            Forward=True,
-                            Wrap=wdFindStop,
-                            Format=False,
-                            ReplaceWith=corrected_period,
-                            Replace=wdReplaceOne,
-                        )
+                        # Assign the cell text directly. A PDF-to-Word conversion
+                        # may separate repeated dates with hidden paragraph marks,
+                        # so searching for the cleaned/crammed string is unreliable.
+                        service_cell.Range.Text = corrected_period
                         print(
                             f"Corrected Matrix service period '{original_period}' "
                             f"to '{corrected_period}'"
@@ -337,26 +535,21 @@ def analyze_word_document(file_path, page_market_mapping=None, amount_overrides=
                 if not matches:
                     continue
 
-                for match in matches:
+                for match_index, match in enumerate(matches):
                     original_amount = match.group(0)
                     # Get market name from current row
-                    market_cell_index = None
                     market_text = ""
-                    for col_idx in range(1, num_cols + 1):
-                        header_text = table.Cell(1, col_idx).Range.Text.strip()
-                        if "Market" in header_text:
-                            market_cell_index = col_idx
-                            break
-
-                    if market_cell_index:
-                        market_text = table.Cell(row_idx, market_cell_index).Range.Text.strip()
+                    if market_col_index:
+                        market_text = table.Cell(row_idx, market_col_index).Range.Text.strip()
                     page_market_text = get_page_market_text(page_market_mapping, page_num)
                     market_text = f"{market_text} {page_market_text}".strip()
-                    updated_amount = find_amount_override(
-                        amount_overrides,
-                        page_num,
-                        market_text,
-                    ) or calculate_updated_amount(original_amount, market_text)
+                    updated_amount = line_item_overrides.get((row_idx, match_index))
+                    if not updated_amount:
+                        updated_amount = find_amount_override(
+                            amount_overrides,
+                            page_num,
+                            market_text,
+                        ) or calculate_updated_amount(original_amount, market_text)
 
                     # Use Word's Find/Replace with wildcard matching
                     find = cell_range.Find

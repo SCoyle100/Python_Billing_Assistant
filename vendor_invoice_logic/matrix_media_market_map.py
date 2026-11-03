@@ -4,17 +4,19 @@ except ImportError:
     win32com = None
 import re
 import logging
+from vendor_invoice_logic.matrix_media_logic import first_matrix_service_period
 
 logging.basicConfig(level=logging.INFO)
 
 # Word constants
 wdActiveEndPageNumber = 3  # Typically 3 in the Word object model
 
-def read_page_markets(file_path):
+def read_page_markets(file_path, include_page_total=False):
     """
     Opens the Word document and returns a dict mapping page number -> (market name, service_period).
     This version does NOT do any rewriting/0.85 math. It inspects the 'Market' and 'Service Period'
     columns on each page and picks the first market and corresponding service period it finds.
+    When include_page_total is true, the page's original line-item total is returned as a third value.
     Example return value: {1: ("Fort Payne", "4/1/25-4/28/25"), 2: ("Birmingham", "5/1/25-5/28/25"), ...}.
     """
 
@@ -37,6 +39,7 @@ def read_page_markets(file_path):
             num_cols = table.Columns.Count
             market_col_index = None
             service_period_col_index = None
+            amount_col_index = None
 
             # Find the Market and Service Period columns (if any)
             for col_idx in range(1, num_cols + 1):
@@ -45,6 +48,8 @@ def read_page_markets(file_path):
                     market_col_index = col_idx
                 elif "Service Period" in header_text:
                     service_period_col_index = col_idx
+                elif "Amount" in header_text:
+                    amount_col_index = col_idx
 
             if market_col_index is None:
                 # No Market column on this page; skip
@@ -53,6 +58,7 @@ def read_page_markets(file_path):
             # Read the Market and Service Period columns from row 2 onward
             num_rows = table.Rows.Count
             market_service_pairs = []  # List of (market, service_period) tuples
+            page_total = 0.0
 
             for row_idx in range(2, num_rows + 1):
                 market_text = table.Cell(row_idx, market_col_index).Range.Text
@@ -62,6 +68,12 @@ def read_page_markets(file_path):
                 if service_period_col_index:
                     service_period = table.Cell(row_idx, service_period_col_index).Range.Text
                     service_period = service_period.replace("\r", "").replace("\a", "").strip()
+                    service_period = first_matrix_service_period(service_period)
+
+                if amount_col_index:
+                    amount_text = table.Cell(row_idx, amount_col_index).Range.Text
+                    for amount_match in re.finditer(r"\$(\d{1,3}(?:,\d{3})*\.\d{2})", amount_text):
+                        page_total += float(amount_match.group(1).replace(",", ""))
 
                 if market_text:
                     market_service_pairs.append((market_text, service_period))
@@ -72,14 +84,23 @@ def read_page_markets(file_path):
                 fort_payne_found = False
                 for market, service_period in market_service_pairs:
                     if "Fort Payne" in market or "Ft. Payne" in market or "Ft Payne" in market:
-                        page_meta[page_num] = ("Fort Payne", service_period)
+                        page_meta[page_num] = (
+                            ("Fort Payne", service_period, page_total)
+                            if include_page_total
+                            else ("Fort Payne", service_period)
+                        )
                         fort_payne_found = True
                         logging.info(f"Fort Payne found on page {page_num}, prioritizing it with service period '{service_period}'")
                         break
 
                 # If no Fort Payne found, use the first market (as before)
                 if not fort_payne_found:
-                    page_meta[page_num] = market_service_pairs[0]
+                    market, service_period = market_service_pairs[0]
+                    page_meta[page_num] = (
+                        (market, service_period, page_total)
+                        if include_page_total
+                        else (market, service_period)
+                    )
                     logging.info(f"Page {page_num} mapped to market '{market_service_pairs[0][0]}', service period '{market_service_pairs[0][1]}'")
 
     finally:

@@ -2,6 +2,7 @@ import unittest
 
 from vendor_invoice_logic.matrix_media_logic import (
     correct_matrix_service_period,
+    first_matrix_service_period,
     normalize_page_service_periods,
 )
 
@@ -41,6 +42,24 @@ class MatrixServicePeriodTests(unittest.TestCase):
         mapping = {1: ("Conyers", "8/313/26-9/27/26")}
         normalize_page_service_periods(mapping)
         self.assertEqual(mapping[1], ("Conyers", "8/31/26 - 9/27/26"))
+
+    def test_repeated_single_dates_keep_only_the_first(self):
+        self.assertEqual(
+            first_matrix_service_period("10/26/26 10/26/26"),
+            "10/26/26",
+        )
+
+    def test_crammed_repeated_dates_keep_only_the_first(self):
+        self.assertEqual(
+            first_matrix_service_period("10/26/2610/26/26"),
+            "10/26/26",
+        )
+
+    def test_a_single_date_range_is_preserved(self):
+        self.assertEqual(
+            first_matrix_service_period("10/14/26-11/10/26"),
+            "10/14/26-11/10/26",
+        )
 
 
 if __name__ == "__main__":

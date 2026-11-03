@@ -5,6 +5,7 @@ try:
     import win32com.client
 except ImportError:
     win32com = None
+from vendor_invoice_logic.matrix_media_logic import first_matrix_service_period
 
 
 
@@ -115,7 +116,9 @@ def build_dataframe_from_word_document(file_path):
                 service_period_value = ""
                 if service_period_col_index is not None:
                     service_period_cell = table.Cell(row_idx, service_period_col_index).Range.Text.strip()
-                    service_period_value = clean_word_cell_text(service_period_cell)
+                    service_period_value = first_matrix_service_period(
+                        clean_word_cell_text(service_period_cell)
+                    )
                 
                 # Read the "Description" cell if available
                 description_value = ""
